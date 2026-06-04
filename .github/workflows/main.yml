@@ -1,0 +1,170 @@
+name: Export Stable Audio ONNX
+
+on:
+  workflow_dispatch:
+    inputs:
+      variant:
+        description: "Stable Audio 3 preset to export."
+        type: choice
+        required: true
+        default: "small-sfx"
+        options:
+          - small-music
+          - small-sfx
+          - medium
+      revision:
+        description: "Model repository revision, branch, tag, or commit."
+        required: true
+        default: "main"
+      artifact_name:
+        description: "Optional artifact name. Leave empty to use a variant-based default."
+        required: false
+        default: ""
+      model_id_override:
+        description: "Optional override for the Hugging Face model repository id."
+        required: false
+        default: ""
+      export_decoder:
+        description: "Export the paired SAME decoder."
+        type: boolean
+        required: true
+        default: true
+      export_text_encoder:
+        description: "Export the paired T5Gemma text encoder."
+        type: boolean
+        required: true
+        default: true
+      download_tokenizer:
+        description: "Download the tokenizer bundle into the exported T5 directory."
+        type: boolean
+        required: true
+        default: true
+      t5_source_repo_id:
+        description: "Optional override for the Hugging Face repository used for T5Gemma assets."
+        required: false
+        default: ""
+      t5_source_subfolder:
+        description: "Subfolder inside the T5 source repository."
+        required: true
+        default: "t5gemma-b-b-ul2"
+      opset:
+        description: "ONNX opset version."
+        required: true
+        default: "17"
+
+permissions:
+  contents: read
+
+jobs:
+  export-stable-audio-onnx:
+    runs-on: ubuntu-latest
+
+    env:
+      OUT_DIR: out
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
+      PYTHONUNBUFFERED: "1"
+
+    steps:
+      - name: Checkout current repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Cache pip packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: >-
+            pip-${{ runner.os }}-stable-audio-${{ github.event.inputs.variant }}-${{ github.event.inputs.opset }}-${{
+            github.event.inputs.export_text_encoder }}-${{ github.event.inputs.download_tokenizer }}
+          restore-keys: |
+            pip-${{ runner.os }}-stable-audio-
+
+      - name: Cache Hugging Face downloads
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: >-
+            hf-${{ runner.os }}-${{ github.event.inputs.variant }}-${{ github.event.inputs.model_id_override }}-${{
+            github.event.inputs.revision }}-${{ github.event.inputs.export_text_encoder }}-${{
+            github.event.inputs.download_tokenizer }}-${{ github.event.inputs.t5_source_repo_id }}-${{
+            github.event.inputs.t5_source_subfolder }}
+          restore-keys: |
+            hf-${{ runner.os }}-${{ github.event.inputs.variant }}-
+            hf-${{ runner.os }}-
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install \
+            torch==2.7.1 \
+            torchaudio==2.7.1 \
+            huggingface_hub \
+            safetensors \
+            onnx \
+            onnxruntime \
+            einops \
+            einops-exts \
+            soundfile \
+            sentencepiece \
+            transformers
+
+      - name: Resolve artifact name
+        shell: bash
+        run: |
+          artifact_name="${{ github.event.inputs.artifact_name }}"
+          if [ -z "${artifact_name}" ]; then
+            case "${{ github.event.inputs.variant }}" in
+              small-music) artifact_name="stable-audio-3-small-music-onnx" ;;
+              small-sfx) artifact_name="stable-audio-3-small-sfx-onnx" ;;
+              medium) artifact_name="stable-audio-3-medium-onnx" ;;
+              *) echo "Unsupported variant: ${{ github.event.inputs.variant }}" >&2; exit 1 ;;
+            esac
+          fi
+          echo "ARTIFACT_NAME=${artifact_name}" >> "${GITHUB_ENV}"
+
+      - name: Export Stable Audio ONNX
+        shell: bash
+        run: |
+          args=(
+            python scripts/export_stable_audio_onnx.py
+            --variant "${{ github.event.inputs.variant }}"
+            --revision "${{ github.event.inputs.revision }}"
+            --out-dir "${OUT_DIR}"
+            --opset "${{ github.event.inputs.opset }}"
+            --t5-source-subfolder "${{ github.event.inputs.t5_source_subfolder }}"
+            --t5-bundle-subdir "t5gemma"
+          )
+
+          if [ -n "${{ github.event.inputs.model_id_override }}" ]; then
+            args+=(--model-id "${{ github.event.inputs.model_id_override }}")
+          fi
+
+          if [ -n "${{ github.event.inputs.t5_source_repo_id }}" ]; then
+            args+=(--t5-source-repo-id "${{ github.event.inputs.t5_source_repo_id }}")
+          fi
+
+          if [ "${{ github.event.inputs.export_decoder }}" = "false" ]; then
+            args+=(--no-export-decoder)
+          fi
+
+          if [ "${{ github.event.inputs.export_text_encoder }}" = "false" ]; then
+            args+=(--no-export-text-encoder)
+          fi
+
+          if [ "${{ github.event.inputs.download_tokenizer }}" = "false" ]; then
+            args+=(--no-download-tokenizer)
+          fi
+
+          "${args[@]}"
+
+      - name: Upload exported ONNX bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ARTIFACT_NAME }}
+          path: out/
+          if-no-files-found: error
