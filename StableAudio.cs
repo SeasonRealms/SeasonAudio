@@ -274,7 +274,7 @@ public partial class StableAudio
     public StableAudio(string model, string? provider = "cpu")
     {
         if (string.IsNullOrWhiteSpace(model))
-            throw new ArgumentException("模型名称不能为空。", nameof(model));
+            throw new ArgumentException("The model name cannot be empty.", nameof(model));
 
         this.model = model;
         this.provider = provider;
