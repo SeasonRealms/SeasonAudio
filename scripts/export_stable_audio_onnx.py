@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+import gc
 import importlib
 import json
 import os
@@ -630,6 +631,53 @@ def _export_text_encoder(
     }
 
 
+def _consolidate_external_data(model_path: Path) -> dict[str, Any]:
+    """Merge per-tensor external data shards into a single companion `.onnx_data` file.
+
+    torch.onnx.export writes models larger than 2GB as one external data shard per
+    tensor (hundreds of files for the medium DiT). The SeasonEngine model pickers expect
+    a graph file plus at most one data companion, so shards are consolidated in place.
+    Fully inline models below 2GB are left untouched.
+    """
+    import onnx
+
+    probe = onnx.load(str(model_path), load_external_data=False)
+    if not any(t.external_data for t in probe.graph.initializer):
+        return {"path": model_path.as_posix(), "data_file": None}
+
+    data_name = f"{model_path.name}_data"
+    model = onnx.load(str(model_path), load_external_data=True)
+    temp_graph_name = f"{model_path.name}.tmp"
+    try:
+        previous_cwd = os.getcwd()
+        try:
+            os.chdir(model_path.parent)
+            onnx.save(
+                model,
+                temp_graph_name,
+                save_as_external_data=True,
+                all_tensors_to_one_file=True,
+                location=data_name,
+                size_threshold=0,
+                convert_attribute=True,
+            )
+        finally:
+            os.chdir(previous_cwd)
+    finally:
+        del model
+        gc.collect()
+
+    os.replace(model_path.parent / temp_graph_name, model_path)
+
+    # The export directory is dedicated to this model, so anything left besides the
+    # graph and the consolidated data file is a stale per-tensor shard.
+    for sibling in model_path.parent.iterdir():
+        if sibling.is_file() and sibling.name not in (model_path.name, data_name):
+            sibling.unlink()
+
+    return {"path": model_path.as_posix(), "data_file": data_name}
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Export Stable Audio checkpoints to ONNX.")
     parser.add_argument(
@@ -683,6 +731,12 @@ def parse_args() -> argparse.Namespace:
         "--t5-bundle-subdir",
         default="t5gemma",
         help="Output subdirectory for exported T5Gemma assets.",
+    )
+    parser.add_argument(
+        "--consolidate-external-data",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Merge per-tensor external data shards into a single .onnx_data companion file after export.",
     )
     return parser.parse_args()
 
@@ -748,6 +802,17 @@ def main() -> None:
             text_conditioner=text_conditioner,
         )
 
+    # The torch checkpoint is no longer needed once every export is done. Drop it
+    # before consolidating so the full-model load below fits in runner memory.
+    del model
+    gc.collect()
+
+    if args.consolidate_external_data:
+        dit_summary.update(_consolidate_external_data(dit_out_path))
+        if artifacts["decoder"]:
+            decoder_out_path = out_dir / args.decoder_subdir / args.decoder_filename
+            artifacts["decoder"].update(_consolidate_external_data(decoder_out_path))
+
     if args.download_tokenizer:
         t5_source_repo_id = args.t5_source_repo_id or args.model_id
         artifacts["tokenizer"] = _download_tokenizer_bundle(
@@ -771,6 +836,7 @@ def main() -> None:
         "sample_size": model_config.get("sample_size"),
         "exports": artifacts,
         "notes": [
+            "Large exports are consolidated to a graph file plus a single companion `.onnx_data` file instead of per-tensor shards.",
             "The DiT export matches the SeasonEngine ONNX runtime contract.",
             "The text encoder and tokenizer can be sourced from the same Stable Audio repo to maximize compatibility.",
             "The decoder export is generated from the SAME weights bundled inside the Stable Audio checkpoint.",
