@@ -47,6 +47,11 @@ on:
         description: "Subfolder inside the T5 source repository."
         required: true
         default: "t5gemma-b-b-ul2"
+      consolidate_external_data:
+        description: "Merge per-tensor external data shards into a single .onnx_data companion file."
+        type: boolean
+        required: true
+        default: true
       opset:
         description: "ONNX opset version."
         required: true
@@ -158,6 +163,10 @@ jobs:
 
           if [ "${{ github.event.inputs.download_tokenizer }}" = "false" ]; then
             args+=(--no-download-tokenizer)
+          fi
+
+          if [ "${{ github.event.inputs.consolidate_external_data }}" = "false" ]; then
+            args+=(--no-consolidate-external-data)
           fi
 
           "${args[@]}"
