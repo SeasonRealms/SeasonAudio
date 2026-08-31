@@ -3,7 +3,7 @@
 // https://github.com/SeasonRealms/SeasonAudio
 // SeasonAudio for Stable Audio Models
 
-namespace Season.AI;
+namespace Season.Audio;
 
 public partial class StableAudio
 {
@@ -31,7 +31,12 @@ public partial class StableAudio
 
         foreach (var methodName in GetProviderMethodNames(provider))
         {
-            var method = typeof(SessionOptions).GetMethod(methodName, BindingFlags.Instance | BindingFlags.Public);
+            var method = typeof(SessionOptions)
+                            .GetMethods(BindingFlags.Instance | BindingFlags.Public)
+                            .Where(m => m.Name == methodName)
+                            .Where(m => m.GetParameters().All(p => p.ParameterType.IsValueType))
+                            .OrderBy(m => m.GetParameters().Length)
+                            .FirstOrDefault();
             if (method == null)
                 continue;
 
@@ -43,9 +48,9 @@ public partial class StableAudio
                 method.Invoke(options, args);
                 break;
             }
-            catch
+            catch (Exception ex)
             {
-                // Provider 不可用时继续回退。
+                Debug.WriteLine($"[StableAudio] failed to append provider via `{methodName}`: {ex.Message}");
             }
         }
 
@@ -78,19 +83,19 @@ public partial class StableAudio
         string modelPath)
     {
         if (!metadataMap.TryGetValue(name, out var metadata))
-            throw new InvalidDataException($"ONNX 输入/输出契约缺少 `{name}`: {modelPath}");
+            throw new InvalidDataException($"The ONNX input/output contract is missing `{name}`: {modelPath}");
 
         if (metadata.ElementType != expectedElementType)
         {
             throw new InvalidDataException(
-                $"ONNX 张量 `{name}` 的元素类型不符，期望 `{expectedElementType.Name}`，实际 `{metadata.ElementType?.Name ?? "unknown"}`: {modelPath}");
+                $"ONNX tensor `{name}` has the wrong element type. Expected `{expectedElementType.Name}`, got `{metadata.ElementType?.Name ?? "unknown"}`: {modelPath}");
         }
 
         int[] actualDimensions = metadata.Dimensions;
         if (actualDimensions.Length != expectedDimensions.Length)
         {
             throw new InvalidDataException(
-                $"ONNX 张量 `{name}` 的维度数不符，期望 {expectedDimensions.Length}，实际 {actualDimensions.Length}: {modelPath}");
+                $"ONNX tensor `{name}` has the wrong rank. Expected {expectedDimensions.Length}, got {actualDimensions.Length}: {modelPath}");
         }
 
         for (int i = 0; i < expectedDimensions.Length; i++)
@@ -99,7 +104,7 @@ public partial class StableAudio
             if (expected.HasValue && actualDimensions[i] != expected.Value)
             {
                 throw new InvalidDataException(
-                    $"ONNX 张量 `{name}` 的第 {i} 维不符，期望 {expected.Value}，实际 {actualDimensions[i]}: {modelPath}");
+                    $"ONNX tensor `{name}` has a mismatch at dimension {i}. Expected {expected.Value}, got {actualDimensions[i]}: {modelPath}");
             }
         }
     }
@@ -113,7 +118,7 @@ public partial class StableAudio
         DenseTensor<float> localAddCond)
     {
         if (latent.Length != LatentChannels * latentLength)
-            throw new InvalidDataException($"DiT 输入 `x` 的展平长度不匹配，期望 {LatentChannels * latentLength}，实际 {latent.Length}。");
+            throw new InvalidDataException($"DiT input `x` has the wrong flattened length. Expected {LatentChannels * latentLength}, got {latent.Length}.");
 
         ValidateTensorShape(hiddenStates, "t5_hidden", 1, MaxTextTokens, 768);
         ValidateTensorShape(t5Mask, "t5_mask", 1, MaxTextTokens);
@@ -128,7 +133,7 @@ public partial class StableAudio
         if (actualDimensions.Length != expectedDimensions.Length)
         {
             throw new InvalidDataException(
-                $"DiT 输入 `{name}` 的维度数不匹配，期望 {expectedDimensions.Length}，实际 {actualDimensions.Length}。");
+                $"DiT input `{name}` has the wrong rank. Expected {expectedDimensions.Length}, got {actualDimensions.Length}.");
         }
 
         for (int i = 0; i < expectedDimensions.Length; i++)
@@ -136,7 +141,7 @@ public partial class StableAudio
             if (actualDimensions[i] != expectedDimensions[i])
             {
                 throw new InvalidDataException(
-                    $"DiT 输入 `{name}` 的第 {i} 维不匹配，期望 {expectedDimensions[i]}，实际 {actualDimensions[i]}。");
+                    $"DiT input `{name}` has a mismatch at dimension {i}. Expected {expectedDimensions[i]}, got {actualDimensions[i]}.");
             }
         }
     }

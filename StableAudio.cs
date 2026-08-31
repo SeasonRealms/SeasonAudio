@@ -3,7 +3,7 @@
 // https://github.com/SeasonRealms/SeasonAudio
 // SeasonAudio for Stable Audio Models
 
-namespace Season.AI;
+namespace Season.Audio;
 
 public partial class StableAudio
 {
@@ -41,11 +41,11 @@ public partial class StableAudio
         int previewHiddenDimensionCount = 8)
     {
         if (previewTokenCount <= 0)
-            throw new ArgumentOutOfRangeException(nameof(previewTokenCount), "token 预览数量必须大于 0。");
+            throw new ArgumentOutOfRangeException(nameof(previewTokenCount), "The token preview count must be greater than 0.");
         if (previewHiddenTokenCount <= 0)
-            throw new ArgumentOutOfRangeException(nameof(previewHiddenTokenCount), "hidden token 预览数量必须大于 0。");
+            throw new ArgumentOutOfRangeException(nameof(previewHiddenTokenCount), "The hidden-token preview count must be greater than 0.");
         if (previewHiddenDimensionCount <= 0)
-            throw new ArgumentOutOfRangeException(nameof(previewHiddenDimensionCount), "hidden 维度预览数量必须大于 0。");
+            throw new ArgumentOutOfRangeException(nameof(previewHiddenDimensionCount), "The hidden-dimension preview count must be greater than 0.");
 
         var runtime = new StableAudio(model, provider);
         var debugInfo = runtime.EncodePromptDebug(runtime.bundle, prompt);
@@ -74,17 +74,17 @@ public partial class StableAudio
         int previewHiddenDimensionCount = 8)
     {
         if (seconds <= 0f)
-            throw new ArgumentOutOfRangeException(nameof(seconds), "音频时长必须大于 0。");
+            throw new ArgumentOutOfRangeException(nameof(seconds), "The audio duration must be greater than 0.");
         if (steps <= 0)
-            throw new ArgumentOutOfRangeException(nameof(steps), "采样步数必须大于 0。");
+            throw new ArgumentOutOfRangeException(nameof(steps), "The number of sampling steps must be greater than 0.");
         if (sigmaMax is < 0.01f or > 1f)
-            throw new ArgumentOutOfRangeException(nameof(sigmaMax), "rf_denoiser 的 sigmaMax 应在 0.01 到 1.0 之间。");
+            throw new ArgumentOutOfRangeException(nameof(sigmaMax), "The sigmaMax of rf_denoiser must be between 0.01 and 1.0.");
         if (previewTokenCount <= 0)
-            throw new ArgumentOutOfRangeException(nameof(previewTokenCount), "token 预览数量必须大于 0。");
+            throw new ArgumentOutOfRangeException(nameof(previewTokenCount), "The token preview count must be greater than 0.");
         if (previewHiddenTokenCount <= 0)
-            throw new ArgumentOutOfRangeException(nameof(previewHiddenTokenCount), "hidden token 预览数量必须大于 0。");
+            throw new ArgumentOutOfRangeException(nameof(previewHiddenTokenCount), "The hidden-token preview count must be greater than 0.");
         if (previewHiddenDimensionCount <= 0)
-            throw new ArgumentOutOfRangeException(nameof(previewHiddenDimensionCount), "hidden 维度预览数量必须大于 0。");
+            throw new ArgumentOutOfRangeException(nameof(previewHiddenDimensionCount), "The hidden-dimension preview count must be greater than 0.");
 
         var runtime = new StableAudio(model, provider);
         WarnIfSmallSfxDuration(runtime.spec, seconds, 0f);
@@ -279,12 +279,48 @@ public partial class StableAudio
         this.model = model;
         this.provider = provider;
         spec = ResolveModelSpec(model, provider);
+        bundle = CreateOrGetBundle(spec, provider);
+    }
+
+    StableAudio(ModelSpec spec, string? provider)
+    {
+        model = spec.CacheKey;
+        this.provider = provider;
+        this.spec = spec;
+        bundle = CreateOrGetBundle(spec, provider);
+    }
+
+    static ModelBundle CreateOrGetBundle(ModelSpec spec, string? provider)
+    {
         var lazyBundle = Bundles.GetOrAdd(
             spec.CacheKey,
             _ => new Lazy<ModelBundle>(
                 () => LoadBundle((spec, provider)),
                 LazyThreadSafetyMode.ExecutionAndPublication));
-        bundle = lazyBundle.Value;
+        return lazyBundle.Value;
+    }
+
+    /// <summary>
+    /// Creates a StableAudio instance from explicit model file paths. Tokenizer
+    /// files are provided as explicit paths: tokenizer.model,
+    /// tokenizer_config.json, special_tokens_map.json.
+    /// </summary>
+    public static StableAudio FromFiles(string ditPath, string decoderPath, string textEncoderPath, string tokenizerModelPath, string tokenizerConfigPath, string specialTokensMapPath, string? provider = "cpu")
+    {
+        if (string.IsNullOrWhiteSpace(ditPath))
+            throw new ArgumentException("The DiT model path cannot be empty.", nameof(ditPath));
+        if (string.IsNullOrWhiteSpace(decoderPath))
+            throw new ArgumentException("The decoder model path cannot be empty.", nameof(decoderPath));
+        if (string.IsNullOrWhiteSpace(textEncoderPath))
+            throw new ArgumentException("The text encoder model path cannot be empty.", nameof(textEncoderPath));
+        if (string.IsNullOrWhiteSpace(tokenizerModelPath))
+            throw new ArgumentException("The tokenizer.model path cannot be empty.", nameof(tokenizerModelPath));
+        if (string.IsNullOrWhiteSpace(tokenizerConfigPath))
+            throw new ArgumentException("The tokenizer_config.json path cannot be empty.", nameof(tokenizerConfigPath));
+        if (string.IsNullOrWhiteSpace(specialTokensMapPath))
+            throw new ArgumentException("The special_tokens_map.json path cannot be empty.", nameof(specialTokensMapPath));
+
+        return new StableAudio(CreateSpecFromFiles(ditPath, decoderPath, textEncoderPath, tokenizerModelPath, tokenizerConfigPath, specialTokensMapPath, provider), provider);
     }
 
     public byte[] Generate(

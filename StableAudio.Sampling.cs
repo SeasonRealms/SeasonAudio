@@ -3,7 +3,7 @@
 // https://github.com/SeasonRealms/SeasonAudio
 // SeasonAudio for Stable Audio Models
 
-namespace Season.AI;
+namespace Season.Audio;
 
 public partial class StableAudio
 {
@@ -227,9 +227,9 @@ public partial class StableAudio
             return;
 
         string message =
-            $"[StableAudio] warning: `small-sfx` 更适合短音效/one-shot。当前 seconds={seconds:0.##}, " +
-            $"conditionedSeconds={conditionedSeconds:0.##}，较容易退化为重复纹理或噪音；建议优先尝试 3-7 秒，" +
-            "并将 durationPaddingSeconds 控制在 0-1 秒。";
+            $"[StableAudio] warning: `small-sfx` is better suited for short sound effects / one-shots. Current seconds={seconds:0.##}, " +
+            $"conditionedSeconds={conditionedSeconds:0.##}; it is more likely to degrade into repeated texture or noise. Prefer trying 3-7 seconds first, " +
+            "and keep durationPaddingSeconds within 0-1 seconds.";
         Trace.WriteLine(message);
         Debug.WriteLine(message);
     }

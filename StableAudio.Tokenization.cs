@@ -3,14 +3,13 @@
 // https://github.com/SeasonRealms/SeasonAudio
 // SeasonAudio for Stable Audio Models
 
-namespace Season.AI;
+namespace Season.Audio;
 
 public partial class StableAudio
 {
-    static PromptTokenizer CreateTokenizer(string tokenizerDirectory)
+    static PromptTokenizer CreateTokenizer(string tokenizerModelPath, string tokenizerConfigPath, string specialTokensMapPath, string? tokenizerJsonPath)
     {
-        var metadata = LoadTokenizerMetadata(tokenizerDirectory);
-        string tokenizerModelPath = Path.Combine(tokenizerDirectory, "tokenizer.model");
+        var metadata = LoadTokenizerMetadata(tokenizerConfigPath, specialTokensMapPath);
         if (File.Exists(tokenizerModelPath))
         {
             using var stream = File.OpenRead(tokenizerModelPath);
@@ -27,8 +26,7 @@ public partial class StableAudio
                 text => tokenizer.EncodeToIds(text));
         }
 
-        string tokenizerJsonPath = Path.Combine(tokenizerDirectory, "tokenizer.json");
-        if (File.Exists(tokenizerJsonPath))
+        if (!string.IsNullOrWhiteSpace(tokenizerJsonPath) && File.Exists(tokenizerJsonPath))
         {
             try
             {
@@ -41,7 +39,7 @@ public partial class StableAudio
                 Trace.WriteLine($"[StableAudio] tokenizer.json fast-path unavailable, fallback to tokenizer.model: {ex.Message}");
             }
         }
-        throw new FileNotFoundException("未找到可用的 tokenizer 文件（需要 `tokenizer.model` 或 `tokenizer.json`）。", tokenizerDirectory);
+        throw new FileNotFoundException("No usable tokenizer file was found (requires `tokenizer.model` or `tokenizer.json`).", tokenizerModelPath);
     }
 
     static PromptTokenizer CreateFastTokenizer(string tokenizerJsonPath, TokenizerMetadata metadata)
@@ -52,7 +50,7 @@ public partial class StableAudio
 
         string modelType = model.GetProperty("type").GetString() ?? string.Empty;
         if (!modelType.Equals("BPE", StringComparison.Ordinal))
-            throw new InvalidDataException($"当前仅支持 tokenizer.json 的 BPE 模型，实际为 {modelType}。");
+            throw new InvalidDataException($"Only BPE models in tokenizer.json are currently supported; got {modelType}.");
 
         var vocabulary = new Dictionary<string, int>(StringComparer.Ordinal);
         foreach (var property in model.GetProperty("vocab").EnumerateObject())
@@ -68,7 +66,7 @@ public partial class StableAudio
 
         int unknownTokenId = vocabulary.TryGetValue(metadata.UnknownToken, out int resolvedUnknownTokenId)
             ? resolvedUnknownTokenId
-            : throw new InvalidDataException($"vocab 中缺少 unk token: {metadata.UnknownToken}");
+            : throw new InvalidDataException($"The vocab is missing the unk token: {metadata.UnknownToken}");
 
         Func<string, string> modelNormalizer = BuildFastTokenizerNormalizer(root);
         ValidateFastTokenizerPreTokenizer(root);
@@ -92,7 +90,7 @@ public partial class StableAudio
     static Dictionary<BpeMergePair, int> BuildMergeRanks(JsonElement mergesElement)
     {
         if (mergesElement.ValueKind != JsonValueKind.Array)
-            throw new InvalidDataException("tokenizer.json 中的 merges 字段格式无效。");
+            throw new InvalidDataException("The merges field in tokenizer.json has an invalid format.");
 
         var ranks = new Dictionary<BpeMergePair, int>();
         int rank = 0;
@@ -100,7 +98,7 @@ public partial class StableAudio
         foreach (var merge in mergesElement.EnumerateArray())
         {
             if (merge.ValueKind != JsonValueKind.Array)
-                throw new InvalidDataException("tokenizer.json 中的单条 merge 不是数组。");
+                throw new InvalidDataException("A merge entry in tokenizer.json is not an array.");
 
             using var pair = merge.EnumerateArray();
             if (!pair.MoveNext())
@@ -128,7 +126,7 @@ public partial class StableAudio
 
         string normalizerType = normalizerElement.GetProperty("type").GetString() ?? string.Empty;
         if (!normalizerType.Equals("Replace", StringComparison.Ordinal))
-            throw new InvalidDataException($"当前仅支持 tokenizer.json 中的 Replace normalizer，实际为 {normalizerType}。");
+            throw new InvalidDataException($"Only the Replace normalizer in tokenizer.json is currently supported; got {normalizerType}.");
 
         string pattern = normalizerElement
             .GetProperty("pattern")
@@ -168,24 +166,21 @@ public partial class StableAudio
         if (!isSupported)
         {
             throw new InvalidDataException(
-                $"当前仅支持 tokenizer.json 中的 Split/MergedWithPrevious/space pre_tokenizer，实际为 type={type}, behavior={behavior}, invert={invert}, pattern={pattern}。");
+                $"Only the Split/MergedWithPrevious/space pre_tokenizer in tokenizer.json is currently supported; got type={type}, behavior={behavior}, invert={invert}, pattern={pattern}.");
         }
     }
 
 
-    static TokenizerMetadata LoadTokenizerMetadata(string tokenizerDirectory)
+    static TokenizerMetadata LoadTokenizerMetadata(string tokenizerConfigPath, string specialTokensMapPath)
     {
-        string configPath = Path.Combine(tokenizerDirectory, "tokenizer_config.json");
-        string specialTokensMapPath = Path.Combine(tokenizerDirectory, "special_tokens_map.json");
-
         var knownTokenIds = new Dictionary<string, int>(StringComparer.Ordinal);
         var specialTokens = new Dictionary<string, int>(StringComparer.Ordinal);
         string? padToken = null;
         string? unknownToken = null;
 
-        if (File.Exists(configPath))
+        if (File.Exists(tokenizerConfigPath))
         {
-            using var document = JsonDocument.Parse(File.ReadAllText(configPath));
+            using var document = JsonDocument.Parse(File.ReadAllText(tokenizerConfigPath));
             var root = document.RootElement;
 
             if (root.TryGetProperty("added_tokens_decoder", out var addedTokens) &&

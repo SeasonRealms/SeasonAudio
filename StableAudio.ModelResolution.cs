@@ -3,7 +3,7 @@
 // https://github.com/SeasonRealms/SeasonAudio
 // SeasonAudio for Stable Audio Models
 
-namespace Season.AI;
+namespace Season.Audio;
 
 public partial class StableAudio
 {
@@ -16,7 +16,7 @@ public partial class StableAudio
         ValidateDiTSessionContract(ditSession, spec.DitPath);
 
         return new ModelBundle(
-            CreateTokenizer(spec.TokenizerDirectory),
+            CreateTokenizer(spec.TokenizerModelPath, spec.TokenizerConfigPath, spec.SpecialTokensMapPath, spec.TokenizerJsonPath),
             textEncoderSession,
             ditSession,
             decoderSession);
@@ -67,7 +67,7 @@ public partial class StableAudio
                     Path.Combine(ResolveStableAudioModelRoot("stable-audio-3-optimized"), "t5gemma", "encoder.onnx"),
                     ResolveTokenizerDirectory(ResolveStableAudioModelRoot("stable-audio-3-optimized")),
                     provider),
-            _ => throw new FileNotFoundException($"未识别的 Stable Audio 模型: {model}")
+            _ => throw new FileNotFoundException($"Unrecognized Stable Audio model: {model}")
         };
     }
 
@@ -92,7 +92,7 @@ public partial class StableAudio
         }
 
         throw new DirectoryNotFoundException(
-            $"未找到 Stable Audio 模型目录。已尝试: {string.Join(", ", Array.ConvertAll(directoryNames, static name => $"Models/{name}"))}");
+            $"Stable Audio model directory was not found. Tried: {string.Join(", ", Array.ConvertAll(directoryNames, static name => $"Models/{name}"))}");
     }
 
     static ModelSpec CreateSpec(string ditDirectory, string decoderPath, string textEncoderPath, string tokenizerDirectory, string? provider)
@@ -103,12 +103,41 @@ public partial class StableAudio
         string resolvedTokenizerDirectory = ResolveExistingDirectory(tokenizerDirectory);
 
         string ditPath = ResolveExistingFile(Path.Combine(resolvedDitDirectory, "dit.onnx"));
+        string tokenizerModelPath = ResolveExistingFile(Path.Combine(resolvedTokenizerDirectory, "tokenizer.model"));
+        string tokenizerConfigPath = ResolveExistingFile(Path.Combine(resolvedTokenizerDirectory, "tokenizer_config.json"));
+        string specialTokensMapPath = ResolveExistingFile(Path.Combine(resolvedTokenizerDirectory, "special_tokens_map.json"));
+        string tokenizerJsonPath = Path.Combine(resolvedTokenizerDirectory, "tokenizer.json");
+        string? resolvedTokenizerJsonPath = File.Exists(tokenizerJsonPath) ? Path.GetFullPath(tokenizerJsonPath) : null;
+
         return new ModelSpec(
             ditPath,
             resolvedDecoderPath,
             resolvedTextEncoderPath,
-            resolvedTokenizerDirectory,
+            tokenizerModelPath,
+            tokenizerConfigPath,
+            specialTokensMapPath,
+            resolvedTokenizerJsonPath,
             $"{ditPath}|{resolvedDecoderPath}|{resolvedTextEncoderPath}|{resolvedTokenizerDirectory}|{provider ?? "auto"}");
+    }
+
+    static ModelSpec CreateSpecFromFiles(string ditPath, string decoderPath, string textEncoderPath, string tokenizerModelPath, string tokenizerConfigPath, string specialTokensMapPath, string? provider)
+    {
+        string resolvedDitPath = ResolveExistingFile(ditPath);
+        string resolvedDecoderPath = ResolveExistingFile(decoderPath);
+        string resolvedTextEncoderPath = ResolveExistingFile(textEncoderPath);
+        string resolvedTokenizerModelPath = ResolveExistingFile(tokenizerModelPath);
+        string resolvedTokenizerConfigPath = ResolveExistingFile(tokenizerConfigPath);
+        string resolvedSpecialTokensMapPath = ResolveExistingFile(specialTokensMapPath);
+
+        return new ModelSpec(
+            resolvedDitPath,
+            resolvedDecoderPath,
+            resolvedTextEncoderPath,
+            resolvedTokenizerModelPath,
+            resolvedTokenizerConfigPath,
+            resolvedSpecialTokensMapPath,
+            null,
+            $"{resolvedDitPath}|{resolvedDecoderPath}|{resolvedTextEncoderPath}|{resolvedTokenizerModelPath}|{provider ?? "auto"}");
     }
 
     static string ResolveSiblingDecoder(string rootDirectory, string modelDirectoryName)
@@ -119,7 +148,7 @@ public partial class StableAudio
         if (lower.Contains("sa3-m"))
             return Path.Combine(rootDirectory, "same-l", "dec_dynamic_triton_swa.onnx");
 
-        throw new FileNotFoundException($"无法根据模型目录推断解码器: {modelDirectoryName}");
+        throw new FileNotFoundException($"Unable to infer the decoder from the model directory: {modelDirectoryName}");
     }
 
     static string ResolveTokenizerDirectory(string modelRoot)
@@ -139,7 +168,7 @@ public partial class StableAudio
                 return Path.GetFullPath(resolved);
         }
 
-        throw new DirectoryNotFoundException("未找到 Stable Audio tokenizer 目录（已尝试 `modelRoot/t5gemma`、`Models/t5gemma` 等位置）。");
+        throw new DirectoryNotFoundException("Stable Audio tokenizer directory was not found (tried locations such as `modelRoot/t5gemma` and `Models/t5gemma`).");
     }
 
     static string ResolveExistingDirectory(string path)
@@ -148,7 +177,7 @@ public partial class StableAudio
         if (Directory.Exists(resolved))
             return Path.GetFullPath(resolved);
 
-        throw new DirectoryNotFoundException($"目录不存在: {path}");
+        throw new DirectoryNotFoundException($"Directory does not exist: {path}");
     }
 
     static string ResolveExistingFile(string path)
@@ -157,7 +186,7 @@ public partial class StableAudio
         if (File.Exists(resolved))
             return Path.GetFullPath(resolved);
 
-        throw new FileNotFoundException($"文件不存在: {path}");
+        throw new FileNotFoundException($"File does not exist: {path}");
     }
 
     static string TryResolvePath(string path)
@@ -213,7 +242,7 @@ public partial class StableAudio
             }
             catch
             {
-                // SeasonEngine 未加载或运行环境未提供 DeviceServices 时，继续使用本地路径探测。
+                // If SeasonEngine is not loaded or the runtime does not provide DeviceServices, continue using local path probing.
             }
         }
 

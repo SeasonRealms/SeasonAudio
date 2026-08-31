@@ -3,7 +3,7 @@
 // https://github.com/SeasonRealms/SeasonAudio
 // SeasonAudio for Stable Audio Models
 
-namespace Season.AI;
+namespace Season.Audio;
 
 public partial class StableAudio
 {
@@ -105,7 +105,7 @@ public partial class StableAudio
         if (TryReadTensor(results, "pcm", out Tensor<short>? shortTensor))
             return ToAudio(shortTensor!);
 
-        throw new InvalidDataException("解码器输出 `pcm` 的张量类型不受支持。");
+        throw new InvalidDataException("The decoder output `pcm` has an unsupported tensor type.");
     }
 
     static DecodedAudio ToAudio<T>(Tensor<T> tensor)
@@ -122,7 +122,7 @@ public partial class StableAudio
         {
             int batch = dims[0];
             if (batch != 1)
-                throw new InvalidDataException($"当前仅支持 batch=1，实际为 {batch}。");
+                throw new InvalidDataException($"Only batch=1 is currently supported; got {batch}.");
 
             if (dims[1] is 1 or 2)
                 return ExtractChannelsFirst(values, dims[1], dims[2]);
@@ -139,7 +139,7 @@ public partial class StableAudio
                 return ExtractChannelsLast(values, dims[0], dims[1]);
         }
 
-        throw new InvalidDataException($"无法识别解码器输出形状: [{string.Join(", ", dims)}]");
+        throw new InvalidDataException($"Unable to recognize the decoder output shape: [{string.Join(", ", dims)}]");
     }
 
     static DecodedAudio ExtractChannelsFirst(float[] values, int channelCount, int frameCount)
@@ -170,7 +170,7 @@ public partial class StableAudio
         if (TryReadTensor(results, outputName, out Tensor<Half>? halfTensor))
             return Array.ConvertAll(halfTensor!.ToArray(), static value => (float)value);
 
-        throw new InvalidDataException($"输出 `{outputName}` 不是受支持的浮点张量。");
+        throw new InvalidDataException($"Output `{outputName}` is not a supported floating-point tensor.");
     }
 
     static bool TryReadTensor<T>(
@@ -192,7 +192,7 @@ public partial class StableAudio
             }
             catch
             {
-                // 输出名称匹配但张量元素类型不匹配时，继续尝试其它 T。
+                // If the output name matches but the tensor element type does not, keep trying other T variants.
             }
         }
 

@@ -3,7 +3,7 @@
 // https://github.com/SeasonRealms/SeasonAudio
 // SeasonAudio for Stable Audio Models
 
-namespace Season.AI;
+namespace Season.Audio;
 
 public partial class StableAudio
 {
@@ -125,7 +125,7 @@ public partial class StableAudio
     static string DescribeArrayDifference(string name, float[] left, float[] right)
     {
         if (left.Length != right.Length)
-            throw new InvalidDataException($"{name} 的数组长度不一致，left={left.Length}, right={right.Length}");
+            throw new InvalidDataException($"Array lengths for {name} do not match, left={left.Length}, right={right.Length}");
 
         var diff = new float[left.Length];
         double dot = 0d;

@@ -3,7 +3,7 @@
 // https://github.com/SeasonRealms/SeasonAudio
 // SeasonAudio for Stable Audio Models
 
-namespace Season.AI;
+namespace Season.Audio;
 
 public partial class StableAudio
 {
@@ -11,7 +11,10 @@ public partial class StableAudio
         string DitPath,
         string DecoderPath,
         string TextEncoderPath,
-        string TokenizerDirectory,
+        string TokenizerModelPath,
+        string TokenizerConfigPath,
+        string SpecialTokensMapPath,
+        string? TokenizerJsonPath,
         string CacheKey);
 
     sealed record TextCondition(

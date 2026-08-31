@@ -21,6 +21,7 @@ The package name is intentionally broader than `Stable Audio` because the long-t
 ## Project Links
 
 - GitHub: [SeasonRealms/SeasonAudio](https://github.com/SeasonRealms/SeasonAudio)
+- Models: https://huggingface.co/SeasonEngine/stable-audio-3-onnx
 - ONNX export workflow: [export-stable-audio-onnx.yml](https://github.com/SeasonRealms/SeasonAudio/actions/workflows/export-stable-audio-onnx.yml)
 
 If you prefer to build the ONNX models yourself, clone the repository and run the workflow logic locally.
