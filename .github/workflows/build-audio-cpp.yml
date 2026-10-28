@@ -38,11 +38,13 @@ on:
           - Release
           - Debug
       audio_cpp_ref:
-        description: "SeasonRealms/audio.cpp tag / branch / commit"
-        required: true
-        # Not a tag: the commit this run resolved is recorded in README.txt of the
-        # artifact, which is what the SeasonAudio package manifest pins.
-        default: "master"
+        description: "SeasonRealms/audio.cpp tag / branch / commit (empty = the default branch, main)"
+        required: false
+        # The fork's default branch is main; there is no master on it, and a ref that
+        # does not resolve makes actions/checkout fail with a bare "exit code 1"
+        # before any step can explain itself. The commit this run resolved is what
+        # README.txt of the artifact pins.
+        default: "main"
       model_set:
         description: "Model composite to compile in (full = all 126 families, slow)"
         required: true
@@ -120,7 +122,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: ${{ env.AUDIOCPP_REPO }}
-          ref: ${{ github.event.inputs.audio_cpp_ref }}
+          ref: ${{ github.event.inputs.audio_cpp_ref || 'main' }}
           # The only submodule is external/audio.cpp-server-frontends, and its URL
           # is relative (../../0xShug0/audio.cpp-server-frontends.git), which does
           # not resolve from our fork - so it is never fetched. The C ABI does not
@@ -129,7 +131,7 @@ jobs:
           submodules: false
           fetch-depth: 1
 
-      - name: Record the vendored ggml version
+      - name: Record the audio.cpp commit and vendored ggml version
         shell: pwsh
         run: |
           $ggml = 'external/ggml/CMakeLists.txt'
@@ -142,6 +144,11 @@ jobs:
           $version = "$major.$minor.$patch"
           Write-Host "vendored ggml: $version"
           "GGML_VENDORED_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          # github.sha is SeasonAudio's commit, not audio.cpp's - this job checks out a
+          # different repository, so the pin has to be read from the tree itself.
+          $commit = (& git rev-parse HEAD) -join ''
+          Write-Host "audio.cpp commit: $commit"
+          "AUDIOCPP_COMMIT=$commit" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
       - name: Install Vulkan SDK
         if: github.event.inputs.enable_vulkan == 'ON'
@@ -190,7 +197,7 @@ jobs:
             '-DCMAKE_CUDA_ARCHITECTURES=${{ github.event.inputs.cuda_architectures }}',
             '-DAUDIOCPP_BUILD_C_API=ON',
             '-DAUDIOCPP_DEPLOYMENT_BUILD=ON',
-            '-DAUDIOCPP_VERSION=${{ github.event.inputs.audio_cpp_ref }}',
+            '-DAUDIOCPP_VERSION=${{ github.event.inputs.audio_cpp_ref || 'main' }}',
             '-DAUDIOCPP_MODEL_SET=${{ github.event.inputs.model_set }}',
             '-DAUDIOCPP_MODELS=${{ github.event.inputs.models }}',
             '-DENGINE_ENABLE_CPU_ALL_VARIANTS=OFF',
@@ -284,8 +291,8 @@ jobs:
           $manifest = Join-Path $out "README.txt"
           @(
             "AUDIOCPP_REPO: ${{ env.AUDIOCPP_REPO }}",
-            "AUDIOCPP_REF: ${{ github.event.inputs.audio_cpp_ref }}",
-            "AUDIOCPP_COMMIT: ${{ github.sha }}",
+            "AUDIOCPP_REF: ${{ github.event.inputs.audio_cpp_ref || 'main' }}",
+            "AUDIOCPP_COMMIT: ${{ env.AUDIOCPP_COMMIT }}",
             "GGML: vendored, ${{ env.GGML_VENDORED_VERSION }}, statically linked into audiocpp.dll",
             "GGML_MAX_NAME: 128",
             "Enabled backends: cpu (static, single ISA), cuda12, vulkan=${{ github.event.inputs.enable_vulkan }}",
@@ -324,11 +331,11 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: ${{ env.AUDIOCPP_REPO }}
-          ref: ${{ github.event.inputs.audio_cpp_ref }}
+          ref: ${{ github.event.inputs.audio_cpp_ref || 'main' }}
           submodules: false
           fetch-depth: 1
 
-      - name: Record the vendored ggml version
+      - name: Record the audio.cpp commit and vendored ggml version
         run: |
           set -euo pipefail
           ggml=external/ggml/CMakeLists.txt
@@ -341,6 +348,11 @@ jobs:
           patch=$(grep -oP 'set\(GGML_VERSION_PATCH\s+\K\d+' "$ggml")
           echo "vendored ggml: ${major}.${minor}.${patch}"
           echo "GGML_VENDORED_VERSION=${major}.${minor}.${patch}" >> "$GITHUB_ENV"
+          # github.sha is SeasonAudio's commit, not audio.cpp's - this job checks out a
+          # different repository, so the pin has to be read from the tree itself.
+          commit=$(git rev-parse HEAD)
+          echo "audio.cpp commit: ${commit}"
+          echo "AUDIOCPP_COMMIT=${commit}" >> "$GITHUB_ENV"
 
       - name: Install build dependencies
         run: |
@@ -374,7 +386,7 @@ jobs:
             -DCMAKE_CUDA_ARCHITECTURES="${{ github.event.inputs.cuda_architectures }}" \
             -DAUDIOCPP_BUILD_C_API=ON \
             -DAUDIOCPP_DEPLOYMENT_BUILD=ON \
-            -DAUDIOCPP_VERSION="${{ github.event.inputs.audio_cpp_ref }}" \
+            -DAUDIOCPP_VERSION="${{ github.event.inputs.audio_cpp_ref || 'main' }}" \
             -DAUDIOCPP_MODEL_SET="${{ github.event.inputs.model_set }}" \
             -DAUDIOCPP_MODELS="${{ github.event.inputs.models }}" \
             -DENGINE_ENABLE_CPU_ALL_VARIANTS=OFF \
@@ -463,8 +475,8 @@ jobs:
 
           {
             echo "AUDIOCPP_REPO: ${{ env.AUDIOCPP_REPO }}"
-            echo "AUDIOCPP_REF: ${{ github.event.inputs.audio_cpp_ref }}"
-            echo "AUDIOCPP_COMMIT: ${{ github.sha }}"
+            echo "AUDIOCPP_REF: ${{ github.event.inputs.audio_cpp_ref || 'main' }}"
+            echo "AUDIOCPP_COMMIT: ${AUDIOCPP_COMMIT}"
             echo "GGML: vendored, ${GGML_VENDORED_VERSION}, statically linked into libaudiocpp.so"
             echo "GGML_MAX_NAME: 128"
             echo "Enabled backends: cpu (static, single ISA), cuda12, vulkan=${{ github.event.inputs.enable_vulkan }}"
@@ -504,11 +516,11 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: ${{ env.AUDIOCPP_REPO }}
-          ref: ${{ github.event.inputs.audio_cpp_ref }}
+          ref: ${{ github.event.inputs.audio_cpp_ref || 'main' }}
           submodules: false
           fetch-depth: 1
 
-      - name: Record the vendored ggml version
+      - name: Record the audio.cpp commit and vendored ggml version
         run: |
           set -euo pipefail
           ggml=external/ggml/CMakeLists.txt
@@ -521,6 +533,11 @@ jobs:
           patch=$(grep -oE 'set\(GGML_VERSION_PATCH +[0-9]+' "$ggml" | grep -oE '[0-9]+$')
           echo "vendored ggml: ${major}.${minor}.${patch}"
           echo "GGML_VENDORED_VERSION=${major}.${minor}.${patch}" >> "$GITHUB_ENV"
+          # github.sha is SeasonAudio's commit, not audio.cpp's - this job checks out a
+          # different repository, so the pin has to be read from the tree itself.
+          commit=$(git rev-parse HEAD)
+          echo "audio.cpp commit: ${commit}"
+          echo "AUDIOCPP_COMMIT=${commit}" >> "$GITHUB_ENV"
 
       - name: Configure + build (Mac Catalyst arm64)
         run: |
@@ -557,7 +574,7 @@ jobs:
             -DGGML_METAL_EMBED_LIBRARY=ON \
             -DAUDIOCPP_BUILD_C_API=ON \
             -DAUDIOCPP_DEPLOYMENT_BUILD=ON \
-            -DAUDIOCPP_VERSION="${{ github.event.inputs.audio_cpp_ref }}" \
+            -DAUDIOCPP_VERSION="${{ github.event.inputs.audio_cpp_ref || 'main' }}" \
             -DAUDIOCPP_MODEL_SET="${{ github.event.inputs.model_set }}" \
             -DAUDIOCPP_MODELS="${{ github.event.inputs.models }}" \
             -DENGINE_ENABLE_CPU_ALL_VARIANTS=OFF \
@@ -634,8 +651,8 @@ jobs:
 
           {
             echo "AUDIOCPP_REPO: ${{ env.AUDIOCPP_REPO }}"
-            echo "AUDIOCPP_REF: ${{ github.event.inputs.audio_cpp_ref }}"
-            echo "AUDIOCPP_COMMIT: ${{ github.sha }}"
+            echo "AUDIOCPP_REF: ${{ github.event.inputs.audio_cpp_ref || 'main' }}"
+            echo "AUDIOCPP_COMMIT: ${AUDIOCPP_COMMIT}"
             echo "GGML: vendored, ${GGML_VENDORED_VERSION}, statically linked into libaudiocpp.dylib"
             echo "GGML_MAX_NAME: 128"
             echo "Target triple: ${ARCH}-apple-ios${MIN_IOS}-macabi"
@@ -672,11 +689,11 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: ${{ env.AUDIOCPP_REPO }}
-          ref: ${{ github.event.inputs.audio_cpp_ref }}
+          ref: ${{ github.event.inputs.audio_cpp_ref || 'main' }}
           submodules: false
           fetch-depth: 1
 
-      - name: Record the vendored ggml version
+      - name: Record the audio.cpp commit and vendored ggml version
         run: |
           set -euo pipefail
           ggml=external/ggml/CMakeLists.txt
@@ -689,6 +706,11 @@ jobs:
           patch=$(grep -oP 'set\(GGML_VERSION_PATCH\s+\K\d+' "$ggml")
           echo "vendored ggml: ${major}.${minor}.${patch}"
           echo "GGML_VENDORED_VERSION=${major}.${minor}.${patch}" >> "$GITHUB_ENV"
+          # github.sha is SeasonAudio's commit, not audio.cpp's - this job checks out a
+          # different repository, so the pin has to be read from the tree itself.
+          commit=$(git rev-parse HEAD)
+          echo "audio.cpp commit: ${commit}"
+          echo "AUDIOCPP_COMMIT=${commit}" >> "$GITHUB_ENV"
 
       - name: Setup Android NDK
         uses: nttld/setup-ndk@v1
@@ -720,7 +742,7 @@ jobs:
             -DGGML_CPU_ARM_ARCH=armv8.2-a+dotprod \
             -DAUDIOCPP_BUILD_C_API=ON \
             -DAUDIOCPP_DEPLOYMENT_BUILD=ON \
-            -DAUDIOCPP_VERSION="${{ github.event.inputs.audio_cpp_ref }}" \
+            -DAUDIOCPP_VERSION="${{ github.event.inputs.audio_cpp_ref || 'main' }}" \
             -DAUDIOCPP_MODEL_SET="${{ github.event.inputs.model_set }}" \
             -DAUDIOCPP_MODELS="${{ github.event.inputs.models }}" \
             -DENGINE_ENABLE_CPU_ALL_VARIANTS=OFF \
@@ -806,8 +828,8 @@ jobs:
 
           {
             echo "AUDIOCPP_REPO: ${{ env.AUDIOCPP_REPO }}"
-            echo "AUDIOCPP_REF: ${{ github.event.inputs.audio_cpp_ref }}"
-            echo "AUDIOCPP_COMMIT: ${{ github.sha }}"
+            echo "AUDIOCPP_REF: ${{ github.event.inputs.audio_cpp_ref || 'main' }}"
+            echo "AUDIOCPP_COMMIT: ${AUDIOCPP_COMMIT}"
             echo "GGML: vendored, ${GGML_VENDORED_VERSION}, statically linked into libaudiocpp.so"
             echo "GGML_MAX_NAME: 128"
             echo "ABI: ${ANDROID_ABI}, minSdk ${ANDROID_API}"
