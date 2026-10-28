@@ -1,0 +1,832 @@
+name: build-audio.cpp
+
+# Builds libaudiocpp (the audio.cpp C ABI) for the SeasonAudio managed wrapper.
+#
+# ggml is SELF-CONTAINED: audio.cpp keeps its own vendored ggml (external/ggml)
+# statically linked into audiocpp, and this workflow never checks out
+# SeasonRealms/ggml. That is deliberate - the vendored tree is ggml 0.12 while the
+# rest of the fleet (SeasonGGML, llama.cpp, qwentts, stable-diffusion) ships
+# SeasonRealms/ggml 0.27 - so the two cannot be merged, and the only way they can
+# share a process is by staying private to each library:
+#
+#   * no ggml*.dll / libggml*.so is produced or shipped by this job,
+#   * audiocpp's dynamic symbol table lists audiocpp_* only (the export lists in
+#     src/capi/audiocpp.map and audiocpp.symbols enforce that on ELF and Mach-O;
+#     on Windows static ggml does not annotate its symbols, so it is not exported),
+#   * GGML_MAX_NAME stays 128 for consistency with the rest of the fleet, which
+#     costs nothing here precisely because no ggml type crosses the ABI.
+#
+# The NVIDIA runtime (cudart / cublas / cublasLt / cufft) is NOT packaged either:
+# cudacudnn-runtime owns it, and both ggml copies in the process end up mapping the
+# same files because NVIDIA's DLL names carry the major version only. This build
+# compiles against CUDA 12.8.1, the same toolkit the rest of the fleet uses.
+#
+# iOS is intentionally absent. libaudiocpp.a would carry its own ggml 0.12 into the
+# app while libggml.a (0.27, SeasonGGML) and the ggml copy inside libqwen.a are also
+# linked there, and duplicate ggml objects cannot be forced into one binary. iOS
+# keeps SeasonTTS / SeasonSTT / SeasonMusic.
+
+on:
+  workflow_dispatch:
+    inputs:
+      configuration:
+        description: "CMake build type"
+        required: true
+        type: choice
+        default: "Release"
+        options:
+          - Release
+          - Debug
+      audio_cpp_ref:
+        description: "SeasonRealms/audio.cpp tag / branch / commit"
+        required: true
+        # Not a tag: the commit this run resolved is recorded in README.txt of the
+        # artifact, which is what the SeasonAudio package manifest pins.
+        default: "master"
+      model_set:
+        description: "Model composite to compile in (full = all 126 families, slow)"
+        required: true
+        type: choice
+        default: "custom"
+        options:
+          - custom
+          - core
+          - full
+      models:
+        description: "AUDIOCPP_MODEL_SET=custom targets, comma separated"
+        required: false
+        # Every family here is Apache-2.0 or MIT in docs/model_licenses.md, so the
+        # package never links a family whose weights we could not redistribute a
+        # loader for. yue2 (CC-BY-NC) and minimax_music3 (Conditional) are left out
+        # on purpose: the shipped binary should not depend on either license.
+        # ace_step (MIT, lyrics conditioning) and heartmula (Apache-2.0) cover the
+        # song-generation surface yue2 would have.
+        default: "builtin_audio_utils,qwen3_tts,qwen3_asr,stable_audio,ace_step,heartmula,kokoro_tts,piper_tts,f5_tts,chatterbox,sense_asr,parakeet_tdt,audiosr,demucs,roformer"
+      cuda_version:
+        description: "CUDA Toolkit version for the Windows and Linux builds"
+        required: false
+        default: "12.8.1"
+      cuda_architectures:
+        description: "CUDA architectures for the Windows and Linux builds"
+        required: false
+        default: "75-virtual;80-real;86-real;89-real;90-virtual"
+      enable_vulkan:
+        description: "Build the Vulkan backend on Windows and Linux (Android stays CPU-only)"
+        required: true
+        type: choice
+        default: "ON"
+        options:
+          - "ON"
+          - "OFF"
+      maccatalyst_min_ios:
+        description: "Mac Catalyst deployment target (the iOS version in the *-macabi triple)"
+        required: false
+        default: "15.0"
+      android_ndk_version:
+        description: "Android NDK version (r28+ required: 16 KB page-size support)"
+        required: false
+        default: "28.2.13676358"
+      build_target:
+        description: "Platform to build (one job per run)"
+        required: true
+        type: choice
+        default: "windows"
+        options:
+          - windows
+          - linux
+          - maccatalyst
+          - android
+      build_parallel:
+        description: "Parallel build jobs"
+        required: false
+        default: "4"
+
+permissions:
+  contents: read
+
+env:
+  AUDIOCPP_REPO: SeasonRealms/audio.cpp
+  # Recorded in manifest; this workflow does not consume it.
+  GGML_MODE: vendored (audio.cpp external/ggml, statically linked)
+
+jobs:
+  build-windows:
+    if: github.event.inputs.build_target == 'windows'
+    runs-on: windows-2022
+    timeout-minutes: 240
+
+    steps:
+      - name: Checkout SeasonRealms/audio.cpp
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.AUDIOCPP_REPO }}
+          ref: ${{ github.event.inputs.audio_cpp_ref }}
+          # The only submodule is external/audio.cpp-server-frontends, and its URL
+          # is relative (../../0xShug0/audio.cpp-server-frontends.git), which does
+          # not resolve from our fork - so it is never fetched. The C ABI does not
+          # need it: AUDIOCPP_BUILD_SERVER_FRONTENDS defaults to OFF and only then
+          # reads AUDIOCPP_SERVER_FRONTENDS_DIR.
+          submodules: false
+          fetch-depth: 1
+
+      - name: Record the vendored ggml version
+        shell: pwsh
+        run: |
+          $ggml = 'external/ggml/CMakeLists.txt'
+          if (-not (Test-Path $ggml)) {
+            throw "the vendored ggml tree is missing: $ggml - this workflow builds ggml only from in-tree sources"
+          }
+          $major = (Select-String -Path $ggml -Pattern 'set\(GGML_VERSION_MAJOR\s+(\d+)\)').Matches[0].Groups[1].Value
+          $minor = (Select-String -Path $ggml -Pattern 'set\(GGML_VERSION_MINOR\s+(\d+)\)').Matches[0].Groups[1].Value
+          $patch = (Select-String -Path $ggml -Pattern 'set\(GGML_VERSION_PATCH\s+(\d+)\)').Matches[0].Groups[1].Value
+          $version = "$major.$minor.$patch"
+          Write-Host "vendored ggml: $version"
+          "GGML_VENDORED_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Install Vulkan SDK
+        if: github.event.inputs.enable_vulkan == 'ON'
+        uses: jakoch/install-vulkan-sdk-action@v1
+
+      - name: Install CUDA Toolkit
+        uses: Jimver/cuda-toolkit@v0.2.35
+        with:
+          cuda: "${{ github.event.inputs.cuda_version }}"
+
+      - name: Setup MSVC Developer Command Prompt
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: amd64
+
+      # Self-contained on purpose: ENGINE_ENABLE_CPU_ALL_VARIANTS=OFF is what
+      # forces BUILD_SHARED_LIBS=OFF + GGML_BACKEND_DL=OFF inside audio.cpp's
+      # CMakeLists (it FORCE-overrides those three), so ggml is a static library
+      # linked into audiocpp.dll. Passing -DGGML_BACKEND_DL=OFF directly would be
+      # silently overridden - it has to go through the ENGINE_* option.
+      #
+      # ENGINE_ENABLE_NATIVE_CPU=OFF is not optional: the option defaults ON and
+      # FORCE-sets GGML_NATIVE, which on a runner with AVX-512 emits instructions
+      # that SIGILL on older user CPUs.
+      - name: Configure CMake
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path build | Out-Null
+          Set-Location build
+
+          $vulkan = if ("${{ github.event.inputs.enable_vulkan }}" -eq "ON") { "ON" } else { "OFF" }
+
+          # GGML_MAX_NAME=128 keeps the ggml_tensor layout identical to the other
+          # ggml runtimes in the product. It is not required for coexistence - no
+          # ggml struct crosses this ABI - but it means a future decision to share
+          # one ggml would not also require an ABI audit.
+          $cmakeArgs = @(
+            '..',
+            '-G', 'Ninja',
+            '-DCMAKE_C_COMPILER=cl.exe',
+            '-DCMAKE_CXX_COMPILER=cl.exe',
+            "-DCMAKE_BUILD_TYPE=${{ github.event.inputs.configuration }}",
+            '-DCMAKE_C_FLAGS=/DGGML_MAX_NAME=128',
+            '-DCMAKE_CXX_FLAGS=/bigobj /DGGML_MAX_NAME=128',
+            '-DCMAKE_CUDA_FLAGS=-Xcudafe "--diag_suppress=177" -Xcudafe "--diag_suppress=550" /DGGML_MAX_NAME=128',
+            '-DCMAKE_CUDA_ARCHITECTURES=${{ github.event.inputs.cuda_architectures }}',
+            '-DAUDIOCPP_BUILD_C_API=ON',
+            '-DAUDIOCPP_DEPLOYMENT_BUILD=ON',
+            '-DAUDIOCPP_VERSION=${{ github.event.inputs.audio_cpp_ref }}',
+            '-DAUDIOCPP_MODEL_SET=${{ github.event.inputs.model_set }}',
+            '-DAUDIOCPP_MODELS=${{ github.event.inputs.models }}',
+            '-DENGINE_ENABLE_CPU_ALL_VARIANTS=OFF',
+            '-DENGINE_ENABLE_NATIVE_CPU=OFF',
+            '-DENGINE_ENABLE_OPENMP=OFF',
+            '-DGGML_OPENMP=OFF',
+            '-DENGINE_BUILD_TESTS=OFF',
+            '-DENGINE_BUILD_EXAMPLES=OFF',
+            '-DENGINE_ENABLE_CUDA=ON',
+            "-DENGINE_ENABLE_VULKAN=$vulkan",
+            '-DGGML_CUDA_CUB_3DOT2=ON',
+            '-DENGINE_ENABLE_HIP=OFF'
+          )
+
+          Write-Host "Running: cmake $($cmakeArgs -join ' ')"
+          & cmake @cmakeArgs 2>&1 | Tee-Object -FilePath configure.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          # Guard against a silent fallback: if AUDIOCPP_GGML_SOURCE_DIR ever points
+          # somewhere else this build stops producing a self-contained library.
+          $line = (Select-String -Path configure.log -Pattern 'Using ggml source:').Line
+          if (-not $line) { throw "cmake did not report 'Using ggml source:' - the ggml guard cannot be trusted" }
+          if ($line -notmatch 'external[\\/]ggml') { throw "ggml came from outside the vendored tree: $line" }
+          Write-Host "ggml guard: $line"
+
+      - name: Build audiocpp
+        working-directory: build
+        shell: pwsh
+        run: |
+          cmake --build . --config "${{ github.event.inputs.configuration }}" --parallel "${{ github.event.inputs.build_parallel }}" --target audiocpp
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      # Proves the two claims the wrapper depends on. Both are cheap and both have
+      # failed silently in other packages before: a SHARED ggml sneaks back in when
+      # someone turns CPU_ALL_VARIANTS on, and the export surface grows when a
+      # dependency forgets to hide its symbols.
+      - name: Assert audiocpp is self-contained
+        shell: pwsh
+        run: |
+          $dll = Get-ChildItem build -Recurse -File -Filter "audiocpp.dll" | Select-Object -First 1
+          if (-not $dll) { throw "audiocpp.dll was not produced" }
+          Write-Host "audiocpp.dll: $($dll.FullName) ($([math]::Round($dll.Length / 1MB, 1)) MB)"
+
+          $ggmlDlls = @(Get-ChildItem build -Recurse -File -Filter "ggml*.dll")
+          if ($ggmlDlls.Count -gt 0) {
+            $ggmlDlls | ForEach-Object { Write-Host "unexpected: $($_.FullName)" }
+            throw "$($ggmlDlls.Count) ggml DLL(s) were produced - ggml must be static here or it will collide with SeasonGGML's ggml.dll"
+          }
+
+          $dependents = & dumpbin /nologo /DEPENDENTS $dll.FullName
+          if ($LASTEXITCODE -ne 0) { throw "dumpbin /DEPENDENTS failed" }
+          $dependents | Write-Host
+          $ggmlDep = @($dependents | Select-String -Pattern 'ggml' -SimpleMatch)
+          if ($ggmlDep.Count -gt 0) { throw "audiocpp.dll imports ggml: $($ggmlDep -join '; ')" }
+
+          $exports = & dumpbin /nologo /EXPORTS $dll.FullName
+          if ($LASTEXITCODE -ne 0) { throw "dumpbin /EXPORTS failed" }
+          $names = @($exports | Select-String -Pattern '^\s+\d+\s+[0-9A-Fa-f]+\s+[0-9A-Fa-f]+\s+(\S+)' | ForEach-Object { $_.Matches[0].Groups[1].Value })
+          if ($names.Count -eq 0) { throw "no exports were parsed from audiocpp.dll - dumpbin output shape changed" }
+          $foreign = @($names | Where-Object { $_ -notlike 'audiocpp_*' })
+          if ($foreign.Count -gt 0) {
+            $foreign | ForEach-Object { Write-Host "unexpected export: $_" }
+            throw "$($foreign.Count) export(s) outside audiocpp_* - a dependency is annotating its symbols"
+          }
+          Write-Host "export surface: $($names.Count) audiocpp_* entry points, nothing else"
+
+          # The NVIDIA runtime travels with cudacudnn-runtime, but the CUDA build
+          # cannot run without it, so this fails now rather than on a user machine.
+          if (-not $env:CUDA_PATH) { throw "CUDA_PATH is not set after installing the toolkit" }
+          $cudaBin = Join-Path $env:CUDA_PATH "bin"
+          foreach ($pattern in @('cudart64_*.dll', 'cublas64_*.dll', 'cublasLt64_*.dll', 'cufft64_*.dll')) {
+            $found = @(Get-ChildItem $cudaBin -File -Filter $pattern -ErrorAction SilentlyContinue)
+            if ($found.Count -eq 0) { throw "CUDA component missing from the toolkit: $pattern (audiocpp links cudart, cublas, cublasLt and cufft)" }
+          }
+
+      - name: Collect artifacts
+        shell: pwsh
+        run: |
+          $out = "out/runtimes/win-x64/native/multi-backend"
+          New-Item -ItemType Directory -Force -Path $out | Out-Null
+
+          $dll = Get-ChildItem build -Recurse -File -Filter "audiocpp.dll" | Select-Object -First 1
+          Copy-Item $dll.FullName -Destination $out -Force
+
+          Copy-Item include/audiocpp.h -Destination $out
+          Copy-Item LICENSE -Destination (Join-Path $out "audio.cpp.txt")
+          if (Test-Path "external/ggml/LICENSE") {
+            Copy-Item "external/ggml/LICENSE" -Destination (Join-Path $out "ggml.txt")
+          }
+
+          $manifest = Join-Path $out "README.txt"
+          @(
+            "AUDIOCPP_REPO: ${{ env.AUDIOCPP_REPO }}",
+            "AUDIOCPP_REF: ${{ github.event.inputs.audio_cpp_ref }}",
+            "AUDIOCPP_COMMIT: ${{ github.sha }}",
+            "GGML: vendored, ${{ env.GGML_VENDORED_VERSION }}, statically linked into audiocpp.dll",
+            "GGML_MAX_NAME: 128",
+            "Enabled backends: cpu (static, single ISA), cuda12, vulkan=${{ github.event.inputs.enable_vulkan }}",
+            "Configuration: ${{ github.event.inputs.configuration }}",
+            "Model set: ${{ github.event.inputs.model_set }}",
+            "CUDA Toolkit version: ${{ github.event.inputs.cuda_version }}",
+            "CUDA runtime: not packaged - cudart / cublas / cublasLt / cufft come from cudacudnn-runtime",
+            "",
+            "Self-contained by design: this package ships NO ggml DLL. audio.cpp's ggml is",
+            "0.12 (its vendored tree) while SeasonGGML ships SeasonRealms/ggml 0.27, and the",
+            "two cannot be merged - they share a process only by each keeping its own copy.",
+            "The export surface is audiocpp_* only, which is what keeps them apart.",
+            "",
+            "Artifact contents:"
+          ) | Set-Content -Path $manifest -Encoding ascii
+
+          Get-ChildItem $out -File | Sort-Object Name | ForEach-Object {
+            Add-Content -Path $manifest -Value $_.Name -Encoding ascii
+          }
+
+      - name: Upload Windows artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: audiocpp-win-x64-multi-backend-${{ github.event.inputs.configuration }}
+          path: out/runtimes/win-x64/native/multi-backend/
+          if-no-files-found: error
+
+  build-linux:
+    if: github.event.inputs.build_target == 'linux'
+    # 22.04 keeps the glibc floor low enough for the SeasonStudio Linux lane.
+    runs-on: ubuntu-22.04
+    timeout-minutes: 240
+
+    steps:
+      - name: Checkout SeasonRealms/audio.cpp
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.AUDIOCPP_REPO }}
+          ref: ${{ github.event.inputs.audio_cpp_ref }}
+          submodules: false
+          fetch-depth: 1
+
+      - name: Record the vendored ggml version
+        run: |
+          set -euo pipefail
+          ggml=external/ggml/CMakeLists.txt
+          if [ ! -f "$ggml" ]; then
+            echo "the vendored ggml tree is missing: $ggml" >&2
+            exit 1
+          fi
+          major=$(grep -oP 'set\(GGML_VERSION_MAJOR\s+\K\d+' "$ggml")
+          minor=$(grep -oP 'set\(GGML_VERSION_MINOR\s+\K\d+' "$ggml")
+          patch=$(grep -oP 'set\(GGML_VERSION_PATCH\s+\K\d+' "$ggml")
+          echo "vendored ggml: ${major}.${minor}.${patch}"
+          echo "GGML_VENDORED_VERSION=${major}.${minor}.${patch}" >> "$GITHUB_ENV"
+
+      - name: Install build dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ninja-build build-essential pkg-config libvulkan-dev
+
+      - name: Install Vulkan SDK
+        if: github.event.inputs.enable_vulkan == 'ON'
+        uses: jakoch/install-vulkan-sdk-action@v1
+
+      - name: Install CUDA Toolkit
+        uses: Jimver/cuda-toolkit@v0.2.35
+        with:
+          cuda: "${{ github.event.inputs.cuda_version }}"
+
+      # Same self-contained configuration as Windows. On ELF the export list plus
+      # --exclude-libs,ALL is what keeps the static ggml objects out of .dynsym, so
+      # libaudiocpp.so cannot interpose on SeasonGGML's libggml.so even when both
+      # are loaded.
+      - name: Configure CMake
+        run: |
+          set -euo pipefail
+          vulkan="${{ github.event.inputs.enable_vulkan }}"
+
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE="${{ github.event.inputs.configuration }}" \
+            -DCMAKE_C_FLAGS="-DGGML_MAX_NAME=128" \
+            -DCMAKE_CXX_FLAGS="-DGGML_MAX_NAME=128 -Wno-deprecated-declarations" \
+            -DCMAKE_CUDA_FLAGS="-DGGML_MAX_NAME=128" \
+            -DCMAKE_CUDA_ARCHITECTURES="${{ github.event.inputs.cuda_architectures }}" \
+            -DAUDIOCPP_BUILD_C_API=ON \
+            -DAUDIOCPP_DEPLOYMENT_BUILD=ON \
+            -DAUDIOCPP_VERSION="${{ github.event.inputs.audio_cpp_ref }}" \
+            -DAUDIOCPP_MODEL_SET="${{ github.event.inputs.model_set }}" \
+            -DAUDIOCPP_MODELS="${{ github.event.inputs.models }}" \
+            -DENGINE_ENABLE_CPU_ALL_VARIANTS=OFF \
+            -DENGINE_ENABLE_NATIVE_CPU=OFF \
+            -DENGINE_ENABLE_OPENMP=OFF \
+            -DGGML_OPENMP=OFF \
+            -DENGINE_BUILD_TESTS=OFF \
+            -DENGINE_BUILD_EXAMPLES=OFF \
+            -DENGINE_ENABLE_CUDA=ON \
+            -DENGINE_ENABLE_VULKAN="$vulkan" \
+            -DGGML_CUDA_CUB_3DOT2=ON \
+            -DENGINE_ENABLE_HIP=OFF \
+            2>&1 | tee configure.log
+
+          grep -F "Using ggml source:" configure.log >/dev/null || {
+            echo "cmake did not report 'Using ggml source:' - the guard cannot be trusted" >&2
+            exit 1
+          }
+          grep -F "external/ggml" configure.log >/dev/null || {
+            echo "ggml did not come from the vendored tree" >&2
+            exit 1
+          }
+          echo "ggml guard: $(grep -F 'Using ggml source:' configure.log | head -n1)"
+
+      - name: Build audiocpp
+        run: |
+          set -euo pipefail
+          cmake --build build --parallel "${{ github.event.inputs.build_parallel }}" --target audiocpp
+
+      - name: Assert audiocpp is self-contained
+        run: |
+          set -euo pipefail
+
+          so=$(find build -type f -name 'libaudiocpp.so*' | head -n1)
+          if [ -z "$so" ]; then
+            echo "libaudiocpp.so was not produced" >&2
+            exit 1
+          fi
+          echo "libaudiocpp.so: $so ($(du -h "$so" | cut -f1))"
+
+          if find build -type f -name 'libggml*.so*' | grep -q .; then
+            find build -type f -name 'libggml*.so*' >&2
+            echo "ggml shared objects were produced - ggml must be static here" >&2
+            exit 1
+          fi
+
+          if ldd "$so" | grep -qi ggml; then
+            echo "libaudiocpp.so has a DT_NEEDED on ggml:" >&2
+            ldd "$so" | grep -i ggml >&2
+            exit 1
+          fi
+
+          # --version-script + --exclude-libs,ALL should leave exactly the audiocpp_*
+          # entry points (plus the linker's own _edata/_end markers).
+          foreign=$(nm -D --defined-only --no-sort "$so" \
+            | awk '{print $3}' \
+            | sed 's/@.*//' \
+            | grep -vE '^(audiocpp_|_edata|__bss_start|_end|__data_start|_init|_fini)$' \
+            | sort -u || true)
+          if [ -n "$foreign" ]; then
+            echo "exports outside audiocpp_*:" >&2
+            echo "$foreign" >&2
+            exit 1
+          fi
+          echo "export surface: $(nm -D --defined-only "$so" | grep -c audiocpp_) audiocpp_* entry points, nothing else"
+
+          # cufft is required by audio.cpp's CUDA ISTFT / torch-random path even
+          # though the file itself ships in cudacudnn-runtime.
+          for component in libcudart.so libcublas.so libcublasLt.so libcufft.so; do
+            if ! find "${CUDA_HOME:-/usr/local/cuda}" -name "${component}*" | grep -q .; then
+              echo "CUDA component missing from the toolkit: $component" >&2
+              exit 1
+            fi
+          done
+
+      - name: Collect artifacts
+        run: |
+          set -euo pipefail
+          out="out/runtimes/linux-x64/native/multi-backend"
+          mkdir -p "$out"
+
+          find build -type f -name 'libaudiocpp.so*' -exec cp -a {} "$out"/ \;
+          cp include/audiocpp.h "$out"/
+          cp LICENSE "$out/audio.cpp.txt"
+          [ -f external/ggml/LICENSE ] && cp external/ggml/LICENSE "$out/ggml.txt"
+
+          {
+            echo "AUDIOCPP_REPO: ${{ env.AUDIOCPP_REPO }}"
+            echo "AUDIOCPP_REF: ${{ github.event.inputs.audio_cpp_ref }}"
+            echo "AUDIOCPP_COMMIT: ${{ github.sha }}"
+            echo "GGML: vendored, ${GGML_VENDORED_VERSION}, statically linked into libaudiocpp.so"
+            echo "GGML_MAX_NAME: 128"
+            echo "Enabled backends: cpu (static, single ISA), cuda12, vulkan=${{ github.event.inputs.enable_vulkan }}"
+            echo "Configuration: ${{ github.event.inputs.configuration }}"
+            echo "Model set: ${{ github.event.inputs.model_set }}"
+            echo "CUDA Toolkit version: ${{ github.event.inputs.cuda_version }}"
+            echo "CUDA runtime: not packaged - cudart / cublas / cublasLt / cufft come from cudacudnn-runtime"
+            echo ""
+            echo "Self-contained by design: this package ships NO libggml*.so. audio.cpp's"
+            echo "ggml is 0.12 (its vendored tree) while SeasonGGML ships SeasonRealms/ggml"
+            echo "0.27. The export surface is audiocpp_* only, which is what keeps the two"
+            echo "runtimes from interposing on each other in one process."
+            echo ""
+            echo "Artifact contents:"
+            (cd "$out" && ls -1)
+          } > "$out/README.txt"
+
+      - name: Upload Linux artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: audiocpp-linux-x64-multi-backend-${{ github.event.inputs.configuration }}
+          path: out/runtimes/linux-x64/native/multi-backend/
+          if-no-files-found: error
+
+  build-maccatalyst:
+    if: github.event.inputs.build_target == 'maccatalyst'
+    # Apple Silicon only: macos-15 is already arm64, so this is a native build.
+    runs-on: macos-15
+    timeout-minutes: 240
+
+    env:
+      ARCH: arm64
+      MIN_IOS: ${{ github.event.inputs.maccatalyst_min_ios }}
+
+    steps:
+      - name: Checkout SeasonRealms/audio.cpp
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.AUDIOCPP_REPO }}
+          ref: ${{ github.event.inputs.audio_cpp_ref }}
+          submodules: false
+          fetch-depth: 1
+
+      - name: Record the vendored ggml version
+        run: |
+          set -euo pipefail
+          ggml=external/ggml/CMakeLists.txt
+          if [ ! -f "$ggml" ]; then
+            echo "the vendored ggml tree is missing: $ggml" >&2
+            exit 1
+          fi
+          major=$(grep -oE 'set\(GGML_VERSION_MAJOR +[0-9]+' "$ggml" | grep -oE '[0-9]+$')
+          minor=$(grep -oE 'set\(GGML_VERSION_MINOR +[0-9]+' "$ggml" | grep -oE '[0-9]+$')
+          patch=$(grep -oE 'set\(GGML_VERSION_PATCH +[0-9]+' "$ggml" | grep -oE '[0-9]+$')
+          echo "vendored ggml: ${major}.${minor}.${patch}"
+          echo "GGML_VENDORED_VERSION=${major}.${minor}.${patch}" >> "$GITHUB_ENV"
+
+      - name: Configure + build (Mac Catalyst arm64)
+        run: |
+          set -euo pipefail
+
+          # Mac Catalyst is not a CMAKE_SYSTEM_NAME: keep the macOS SDK and switch
+          # the clang target triple to <arch>-apple-ios<ver>-macabi.
+          # CMAKE_OSX_DEPLOYMENT_TARGET must stay empty or CMake injects
+          # -mmacosx-version-min=, which conflicts with -target.
+          SDK_PATH="$(xcrun --sdk macosx --show-sdk-path)"
+          TRIPLE="${ARCH}-apple-ios${MIN_IOS}-macabi"
+
+          CAT_FLAGS="-target ${TRIPLE}"
+          CAT_FLAGS="${CAT_FLAGS} -isystem ${SDK_PATH}/System/iOSSupport/usr/include"
+          CAT_FLAGS="${CAT_FLAGS} -iframework ${SDK_PATH}/System/iOSSupport/System/Library/Frameworks"
+          CAT_FLAGS="${CAT_FLAGS} -DGGML_MAX_NAME=128"
+
+          LINK_FLAGS="-target ${TRIPLE} -isysroot ${SDK_PATH}"
+          LINK_FLAGS="${LINK_FLAGS} -L${SDK_PATH}/System/iOSSupport/usr/lib"
+          LINK_FLAGS="${LINK_FLAGS} -F${SDK_PATH}/System/iOSSupport/System/Library/Frameworks"
+
+          # CMAKE_OSX_ARCHITECTURES must be exactly "arm64": ggml compares it with
+          # STREQUAL to pick GGML_SYSTEM_ARCH=ARM, which is what lets
+          # GGML_CPU_ARM_ARCH take effect.
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE="${{ github.event.inputs.configuration }}" \
+            -DCMAKE_OSX_SYSROOT="${SDK_PATH}" \
+            -DCMAKE_OSX_ARCHITECTURES="${ARCH}" \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET= \
+            -DCMAKE_C_FLAGS="${CAT_FLAGS}" \
+            -DCMAKE_CXX_FLAGS="${CAT_FLAGS}" \
+            -DCMAKE_SHARED_LINKER_FLAGS="${LINK_FLAGS}" \
+            -DGGML_CPU_ARM_ARCH=armv8.2-a+dotprod \
+            -DGGML_METAL_EMBED_LIBRARY=ON \
+            -DAUDIOCPP_BUILD_C_API=ON \
+            -DAUDIOCPP_DEPLOYMENT_BUILD=ON \
+            -DAUDIOCPP_VERSION="${{ github.event.inputs.audio_cpp_ref }}" \
+            -DAUDIOCPP_MODEL_SET="${{ github.event.inputs.model_set }}" \
+            -DAUDIOCPP_MODELS="${{ github.event.inputs.models }}" \
+            -DENGINE_ENABLE_CPU_ALL_VARIANTS=OFF \
+            -DENGINE_ENABLE_NATIVE_CPU=OFF \
+            -DENGINE_ENABLE_OPENMP=OFF \
+            -DGGML_OPENMP=OFF \
+            -DENGINE_ENABLE_METAL=ON \
+            -DENGINE_ENABLE_CUDA=OFF \
+            -DENGINE_ENABLE_VULKAN=OFF \
+            -DENGINE_BUILD_TESTS=OFF \
+            -DENGINE_BUILD_EXAMPLES=OFF \
+            2>&1 | tee configure.log
+
+          grep -F "Using ggml source:" configure.log >/dev/null || {
+            echo "cmake did not report 'Using ggml source:' - the guard cannot be trusted" >&2
+            exit 1
+          }
+          grep -F "external/ggml" configure.log >/dev/null || {
+            echo "ggml did not come from the vendored tree" >&2
+            exit 1
+          }
+          echo "ggml guard: $(grep -F 'Using ggml source:' configure.log | head -n1)"
+
+          cmake --build build --parallel "${{ github.event.inputs.build_parallel }}" --target audiocpp
+
+      - name: Assert audiocpp is self-contained
+        run: |
+          set -euo pipefail
+
+          dylib=$(find build -type f -name 'libaudiocpp*.dylib' | head -n1)
+          if [ -z "$dylib" ]; then
+            echo "libaudiocpp.dylib was not produced" >&2
+            exit 1
+          fi
+          echo "libaudiocpp.dylib: $dylib ($(du -h "$dylib" | cut -f1))"
+
+          if find build -type f -name 'libggml*.dylib' | grep -q .; then
+            find build -type f -name 'libggml*.dylib' >&2
+            echo "ggml dylibs were produced - ggml must be static here" >&2
+            exit 1
+          fi
+
+          if otool -L "$dylib" | grep -qi ggml; then
+            echo "libaudiocpp.dylib links ggml:" >&2
+            otool -L "$dylib" >&2
+            exit 1
+          fi
+
+          # -exported_symbols_list restricts the external surface to audiocpp_*.
+          foreign=$(nm -gU "$dylib" | awk '{print $3}' | sed 's/^_//' | grep -vE '^(audiocpp_|mh_execute_header)$' | sort -u || true)
+          if [ -n "$foreign" ]; then
+            echo "exports outside audiocpp_*:" >&2
+            echo "$foreign" >&2
+            exit 1
+          fi
+          echo "export surface: $(nm -gU "$dylib" | grep -c audiocpp_) audiocpp_* entry points, nothing else"
+
+          # Metal is the only GPU path here; prove the metallib is embedded so the
+          # dylib does not need ggml-metal.metal beside it at run time.
+          if ! strings "$dylib" | grep -q 'GGML_METAL_EMBED_LIBRARY\|metallib'; then
+            echo "warning: no embedded metallib marker found - verify the Metal library is not loaded from disk" >&2
+          fi
+
+      - name: Collect artifacts
+        run: |
+          set -euo pipefail
+          out="out/runtimes/maccatalyst-arm64/native/multi-backend"
+          mkdir -p "$out"
+
+          find build -type f -name 'libaudiocpp*.dylib' -exec cp -a {} "$out"/ \;
+          cp include/audiocpp.h "$out"/
+          cp LICENSE "$out/audio.cpp.txt"
+          [ -f external/ggml/LICENSE ] && cp external/ggml/LICENSE "$out/ggml.txt"
+
+          {
+            echo "AUDIOCPP_REPO: ${{ env.AUDIOCPP_REPO }}"
+            echo "AUDIOCPP_REF: ${{ github.event.inputs.audio_cpp_ref }}"
+            echo "AUDIOCPP_COMMIT: ${{ github.sha }}"
+            echo "GGML: vendored, ${GGML_VENDORED_VERSION}, statically linked into libaudiocpp.dylib"
+            echo "GGML_MAX_NAME: 128"
+            echo "Target triple: ${ARCH}-apple-ios${MIN_IOS}-macabi"
+            echo "Enabled backends: cpu (armv8.2-a+dotprod), metal"
+            echo "Configuration: ${{ github.event.inputs.configuration }}"
+            echo "Model set: ${{ github.event.inputs.model_set }}"
+            echo ""
+            echo "Self-contained by design: libaudiocpp.dylib carries its own ggml 0.12 and"
+            echo "has no dependency on libggml.dylib (SeasonRealms/ggml 0.27). Mach-O"
+            echo "two-level namespace keeps the two apart even when both are loaded."
+            echo ""
+            echo "Artifact contents:"
+            (cd "$out" && ls -1)
+          } > "$out/README.txt"
+
+      - name: Upload Mac Catalyst artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: audiocpp-maccatalyst-arm64-multi-backend-${{ github.event.inputs.configuration }}
+          path: out/runtimes/maccatalyst-arm64/native/multi-backend/
+          if-no-files-found: error
+
+  build-android:
+    if: github.event.inputs.build_target == 'android'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 240
+
+    env:
+      ANDROID_API: 29
+      ANDROID_ABI: arm64-v8a
+
+    steps:
+      - name: Checkout SeasonRealms/audio.cpp
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.AUDIOCPP_REPO }}
+          ref: ${{ github.event.inputs.audio_cpp_ref }}
+          submodules: false
+          fetch-depth: 1
+
+      - name: Record the vendored ggml version
+        run: |
+          set -euo pipefail
+          ggml=external/ggml/CMakeLists.txt
+          if [ ! -f "$ggml" ]; then
+            echo "the vendored ggml tree is missing: $ggml" >&2
+            exit 1
+          fi
+          major=$(grep -oP 'set\(GGML_VERSION_MAJOR\s+\K\d+' "$ggml")
+          minor=$(grep -oP 'set\(GGML_VERSION_MINOR\s+\K\d+' "$ggml")
+          patch=$(grep -oP 'set\(GGML_VERSION_PATCH\s+\K\d+' "$ggml")
+          echo "vendored ggml: ${major}.${minor}.${patch}"
+          echo "GGML_VENDORED_VERSION=${major}.${minor}.${patch}" >> "$GITHUB_ENV"
+
+      - name: Setup Android NDK
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: ${{ github.event.inputs.android_ndk_version }}
+          link-to-sdk: true
+
+      - name: Install build dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ninja-build
+
+      # Android is CPU-only on purpose. A Vulkan backend here would mean a second
+      # VkInstance in a process that already runs SeasonGGML's, which is the shape
+      # of the mobile driver hangs we have hit before - and the CPU path is the
+      # only one a 16 KB-page check can clear anyway.
+      - name: Configure CMake (Android)
+        run: |
+          set -euo pipefail
+          cmake -S . -B build-android -G Ninja \
+            -DCMAKE_TOOLCHAIN_FILE="${ANDROID_NDK_HOME}/build/cmake/android.toolchain.cmake" \
+            -DANDROID_ABI="${ANDROID_ABI}" \
+            -DANDROID_PLATFORM="android-${ANDROID_API}" \
+            -DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON \
+            -DCMAKE_BUILD_TYPE="${{ github.event.inputs.configuration }}" \
+            -DCMAKE_C_FLAGS="-DGGML_MAX_NAME=128" \
+            -DCMAKE_CXX_FLAGS="-DGGML_MAX_NAME=128" \
+            -DGGML_CPU_ARM_ARCH=armv8.2-a+dotprod \
+            -DAUDIOCPP_BUILD_C_API=ON \
+            -DAUDIOCPP_DEPLOYMENT_BUILD=ON \
+            -DAUDIOCPP_VERSION="${{ github.event.inputs.audio_cpp_ref }}" \
+            -DAUDIOCPP_MODEL_SET="${{ github.event.inputs.model_set }}" \
+            -DAUDIOCPP_MODELS="${{ github.event.inputs.models }}" \
+            -DENGINE_ENABLE_CPU_ALL_VARIANTS=OFF \
+            -DENGINE_ENABLE_NATIVE_CPU=OFF \
+            -DENGINE_ENABLE_OPENMP=OFF \
+            -DGGML_OPENMP=OFF \
+            -DENGINE_ENABLE_CUDA=OFF \
+            -DENGINE_ENABLE_VULKAN=OFF \
+            -DENGINE_ENABLE_METAL=OFF \
+            -DENGINE_BUILD_TESTS=OFF \
+            -DENGINE_BUILD_EXAMPLES=OFF \
+            2>&1 | tee configure.log
+
+          grep -F "Using ggml source:" configure.log >/dev/null || {
+            echo "cmake did not report 'Using ggml source:' - the guard cannot be trusted" >&2
+            exit 1
+          }
+          grep -F "external/ggml" configure.log >/dev/null || {
+            echo "ggml did not come from the vendored tree" >&2
+            exit 1
+          }
+          echo "ggml guard: $(grep -F 'Using ggml source:' configure.log | head -n1)"
+
+      - name: Build audiocpp
+        run: |
+          set -euo pipefail
+          cmake --build build-android --parallel "${{ github.event.inputs.build_parallel }}" --target audiocpp
+
+      - name: Assert audiocpp is self-contained and 16 KB aligned
+        run: |
+          set -euo pipefail
+
+          so=$(find build-android -type f -name 'libaudiocpp.so' | head -n1)
+          if [ -z "$so" ]; then
+            echo "libaudiocpp.so was not produced" >&2
+            exit 1
+          fi
+          echo "libaudiocpp.so: $so ($(du -h "$so" | cut -f1))"
+
+          if find build-android -type f -name 'libggml*.so*' | grep -q .; then
+            find build-android -type f -name 'libggml*.so*' >&2
+            echo "ggml shared objects were produced - ggml must be static on Android too" >&2
+            exit 1
+          fi
+
+          if readelf -d "$so" | grep -i 'NEEDED' | grep -qi ggml; then
+            echo "libaudiocpp.so has a DT_NEEDED on ggml:" >&2
+            readelf -d "$so" >&2
+            exit 1
+          fi
+
+          foreign=$(nm -D --defined-only --no-sort "$so" \
+            | awk '{print $3}' \
+            | sed 's/@.*//' \
+            | grep -vE '^(audiocpp_|_edata|__bss_start|_end|__data_start|_init|_fini)$' \
+            | sort -u || true)
+          if [ -n "$foreign" ]; then
+            echo "exports outside audiocpp_*:" >&2
+            echo "$foreign" >&2
+            exit 1
+          fi
+
+          # Google Play requires 16 KB page-size support from Nov 2025: every LOAD
+          # segment must be aligned to 0x4000 (16384), not just the linker flag.
+          bad=$(readelf -lW "$so" | awk '/^  LOAD/ {print $NF}' | sort -u | grep -v -x '0x4000' || true)
+          if [ -n "$bad" ]; then
+            echo "LOAD segments are not 16 KB aligned: $bad" >&2
+            readelf -lW "$so" >&2
+            exit 1
+          fi
+          echo "16 KB page alignment: ok"
+
+      - name: Collect artifacts
+        run: |
+          set -euo pipefail
+          out="out/runtimes/android-arm64/native/multi-backend"
+          mkdir -p "$out"
+
+          find build-android -type f -name 'libaudiocpp.so' -exec cp -a {} "$out"/ \;
+          cp include/audiocpp.h "$out"/
+          cp LICENSE "$out/audio.cpp.txt"
+          [ -f external/ggml/LICENSE ] && cp external/ggml/LICENSE "$out/ggml.txt"
+
+          {
+            echo "AUDIOCPP_REPO: ${{ env.AUDIOCPP_REPO }}"
+            echo "AUDIOCPP_REF: ${{ github.event.inputs.audio_cpp_ref }}"
+            echo "AUDIOCPP_COMMIT: ${{ github.sha }}"
+            echo "GGML: vendored, ${GGML_VENDORED_VERSION}, statically linked into libaudiocpp.so"
+            echo "GGML_MAX_NAME: 128"
+            echo "ABI: ${ANDROID_ABI}, minSdk ${ANDROID_API}"
+            echo "Enabled backends: cpu (armv8.2-a+dotprod)"
+            echo "Configuration: ${{ github.event.inputs.configuration }}"
+            echo "Model set: ${{ github.event.inputs.model_set }}"
+            echo ""
+            echo "Self-contained by design: no libggml*.so is shipped, so the app can link"
+            echo "SeasonGGML's libggml.so (0.27) beside this one without a symbol clash."
+            echo "Vulkan is off in this lane; a second VkInstance in a process that already"
+            echo "runs SeasonGGML's is the known mobile driver hang shape."
+            echo ""
+            echo "Artifact contents:"
+            (cd "$out" && ls -1)
+          } > "$out/README.txt"
+
+      - name: Upload Android artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: audiocpp-android-arm64-multi-backend-${{ github.event.inputs.configuration }}
+          path: out/runtimes/android-arm64/native/multi-backend/
+          if-no-files-found: error

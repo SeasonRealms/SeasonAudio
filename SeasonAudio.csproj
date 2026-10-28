@@ -1,9 +1,109 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <TargetFramework>net10.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>True</AllowUnsafeBlocks>
+    <LangVersion>preview</LangVersion>
+    <AssemblyName>SeasonAudio</AssemblyName>
+    <RootNamespace>Season.Audio</RootNamespace>
+    <PackageId>SeasonAudio</PackageId>
+    <Title>SeasonAudio</Title>
+    <Version>0.1.0</Version>
+    <Authors>SeasonRealms</Authors>
+    <Company>SeasonRealms</Company>
+    <Description>Managed wrapper over the audio.cpp C ABI for SeasonEngine: music generation, text-to-speech, speech recognition, voice cloning/conversion, source separation and the rest of the audio.cpp task surface, driven by models the user imports.</Description>
+    <PackageTags>audio;audio.cpp;ggml;tts;asr;music;speech;ai;seasonengine</PackageTags>
+    <PackageProjectUrl>https://github.com/SeasonRealms/SeasonAudio</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/SeasonRealms/SeasonAudio</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PublishRepositoryUrl>true</PublishRepositoryUrl>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <!-- audio.cpp itself is Apache-2.0; this wrapper is MIT like the sibling packages. -->
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageRequireLicenseAcceptance>false</PackageRequireLicenseAcceptance>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <NoWarn>$(NoWarn);CS1591;CS1572;CS1573</NoWarn>
+
+    <!--
+      No iOS and no browser target. On iOS every ggml-based runtime is a static
+      archive linked into the app, so libaudiocpp.a would bring its own ggml 0.12
+      next to libggml.a (SeasonRealms/ggml 0.27, SeasonGGML) and the ggml objects
+      inside libqwen.a - duplicate definitions that no linker flag can reconcile.
+      iOS keeps SeasonTTS / SeasonSTT / SeasonMusic. The browser target has no
+      native transport for the C ABI at all.
+    -->
+    <TargetFrameworks>net10.0-android;net10.0-maccatalyst;net10.0</TargetFrameworks>
+    <TargetFrameworks Condition="$([MSBuild]::IsOSPlatform('windows'))">$(TargetFrameworks);net10.0-windows10.0.19041.0</TargetFrameworks>
+
+    <IsAndroid Condition="$(TargetFramework.Contains('android'))">true</IsAndroid>
+    <IsMacCatalyst Condition="$(TargetFramework.Contains('maccatalyst'))">true</IsMacCatalyst>
+    <IsWindows Condition="$(TargetFramework.Contains('windows'))">true</IsWindows>
+    <IsLinux Condition="'$(TargetFramework)' == 'net10.0'">true</IsLinux>
+    <IsApple Condition="'$(IsMacCatalyst)' == 'true'">true</IsApple>
+
+    <SupportedOSPlatformVersion Condition="'$(IsMacCatalyst)' == 'true'">15.0</SupportedOSPlatformVersion>
+    <SupportedOSPlatformVersion Condition="'$(IsAndroid)' == 'true'">29.0</SupportedOSPlatformVersion>
+    <SupportedOSPlatformVersion Condition="'$(IsWindows)' == 'true'">10.0.17763.0</SupportedOSPlatformVersion>
+    <TargetPlatformMinVersion Condition="'$(IsWindows)' == 'true'">10.0.17763.0</TargetPlatformMinVersion>
   </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="README.md" Pack="true" PackagePath="\" />
+
+    <!-- .h/.txt are ABI and license material: they ship in the NuGet package but
+         never in an app output, where every AI package would collide on ggml.txt. -->
+    <None Include="runtimes\win-x64\native\*" Pack="true" PackagePath="runtimes/win-x64/native/" Condition="Exists('runtimes\win-x64\native')" />
+    <None Include="runtimes\maccatalyst-arm64\native\*" Pack="true" PackagePath="runtimes/maccatalyst-arm64/native/" Condition="Exists('runtimes\maccatalyst-arm64\native')" />
+    <None Include="runtimes\linux-x64\native\*" Pack="true" PackagePath="runtimes/linux-x64/native/" Condition="Exists('runtimes\linux-x64\native')" />
+    <None Include="runtimes\android-arm64\native\*" Pack="true" PackagePath="runtimes/android-arm64/native/" Condition="Exists('runtimes\android-arm64\native')" />
+  </ItemGroup>
+
+  <!--
+    Deliberately NO ProjectReference to SeasonGGML. libaudiocpp carries its own
+    ggml (0.12) statically and exports only audiocpp_*; referencing SeasonGGML
+    would drag libggml (0.27) into every consumer of this package and defeat the
+    point of the private copy. An app that wants both simply references both
+    packages - see the README for why that is safe.
+  -->
+
+  <!-- Android: the .NET Android SDK's AutoImport turns every **\*.so in the project
+       directory into an AndroidNativeLibrary, and RID-layout paths it cannot map
+       fail with XA4301. Remove those, then include the arm64-v8a set explicitly. -->
+  <ItemGroup Condition="'$(IsAndroid)' == 'true'">
+    <AndroidNativeLibrary Remove="runtimes\**\*.so" />
+    <AndroidNativeLibrary Include="runtimes\android-arm64\native\*.so" Condition="Exists('runtimes\android-arm64\native')" />
+  </ItemGroup>
+
+  <!-- Windows: audiocpp.dll goes next to the executable, which is also where the
+       NVIDIA runtime staged by cudacudnn-runtime lives. -->
+  <ItemGroup Condition="'$(IsWindows)' == 'true'">
+    <Content Include="runtimes\win-x64\native\*" Exclude="runtimes\win-x64\native\*.h;runtimes\win-x64\native\*.txt" Condition="Exists('runtimes\win-x64\native')">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Link>%(Filename)%(Extension)</Link>
+      <Pack>false</Pack>
+    </Content>
+  </ItemGroup>
+
+  <!-- Linux: same, flat. ld.so resolves DT_NEEDED from the loader search path only,
+       so NativeLibraryResolver preloads by absolute path - see that file. -->
+  <ItemGroup Condition="'$(IsLinux)' == 'true'">
+    <Content Include="runtimes\linux-x64\native\*" Exclude="runtimes\linux-x64\native\*.h;runtimes\linux-x64\native\*.txt" Condition="Exists('runtimes\linux-x64\native')">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Link>%(Filename)%(Extension)</Link>
+      <Pack>false</Pack>
+    </Content>
+  </ItemGroup>
+
+  <!-- Mac Catalyst: libaudiocpp.dylib (ggml statically linked in; otool -L shows no
+       libggml dependency). NativeMethods P/Invokes "audiocpp", so the dylib must be
+       in the bundle; the Apple SDK places it under Contents/MonoBundle. -->
+  <ItemGroup Condition="'$(IsMacCatalyst)' == 'true'">
+    <Content Include="runtimes\maccatalyst-arm64\native\libaudiocpp.dylib" Condition="Exists('runtimes\maccatalyst-arm64\native\libaudiocpp.dylib')">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Link>%(Filename)%(Extension)</Link>
+      <Pack>false</Pack>
+    </Content>
+  </ItemGroup>
 
 </Project>
