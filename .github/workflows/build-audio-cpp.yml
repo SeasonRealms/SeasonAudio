@@ -185,6 +185,13 @@ jobs:
           # ggml runtimes in the product. It is not required for coexistence - no
           # ggml struct crosses this ABI - but it means a future decision to share
           # one ggml would not also require an ABI audit.
+          #
+          # CMAKE_CUDA_FLAGS spells the define -D, never /D: nvcc does not accept
+          # cl's /D form, and a bare /DGGML_MAX_NAME=128 is parsed as an input file,
+          # so the compiler test dies with "A single input file is required for a
+          # non-link phase when an outputfile is specified" before any ggml source
+          # is compiled. -Xcudafe is written with '=' for the same reason - it keeps
+          # the whole flag string free of embedded quotes.
           $cmakeArgs = @(
             '..',
             '-G', 'Ninja',
@@ -193,7 +200,7 @@ jobs:
             "-DCMAKE_BUILD_TYPE=${{ github.event.inputs.configuration }}",
             '-DCMAKE_C_FLAGS=/DGGML_MAX_NAME=128',
             '-DCMAKE_CXX_FLAGS=/bigobj /DGGML_MAX_NAME=128',
-            '-DCMAKE_CUDA_FLAGS=-Xcudafe "--diag_suppress=177" -Xcudafe "--diag_suppress=550" /DGGML_MAX_NAME=128',
+            '-DCMAKE_CUDA_FLAGS=-Xcudafe=--diag_suppress=177 -Xcudafe=--diag_suppress=550 -DGGML_MAX_NAME=128',
             '-DCMAKE_CUDA_ARCHITECTURES=${{ github.event.inputs.cuda_architectures }}',
             '-DAUDIOCPP_BUILD_C_API=ON',
             '-DAUDIOCPP_DEPLOYMENT_BUILD=ON',
