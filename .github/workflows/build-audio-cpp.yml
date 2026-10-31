@@ -13,7 +13,7 @@ name: build-audio.cpp
 #   * audiocpp's dynamic symbol table lists audiocpp_* only (the export lists in
 #     src/capi/audiocpp.map and audiocpp.symbols enforce that on ELF and Mach-O;
 #     on Windows static ggml does not annotate its symbols, so it is not exported),
-#   * GGML_MAX_NAME stays 128 for consistency with the rest of the fleet, which
+#   * GGML_MAX_NAME stays 160 for consistency with the rest of the fleet, which
 #     costs nothing here precisely because no ggml type crosses the ABI.
 #
 # The NVIDIA runtime (cudart / cublas / cublasLt / cufft) is NOT packaged either:
@@ -181,13 +181,13 @@ jobs:
 
           $vulkan = if ("${{ github.event.inputs.enable_vulkan }}" -eq "ON") { "ON" } else { "OFF" }
 
-          # GGML_MAX_NAME=128 keeps the ggml_tensor layout identical to the other
+          # GGML_MAX_NAME=160 keeps the ggml_tensor layout identical to the other
           # ggml runtimes in the product. It is not required for coexistence - no
           # ggml struct crosses this ABI - but it means a future decision to share
           # one ggml would not also require an ABI audit.
           #
           # CMAKE_CUDA_FLAGS spells the define -D, never /D: nvcc does not accept
-          # cl's /D form, and a bare /DGGML_MAX_NAME=128 is parsed as an input file,
+          # cl's /D form, and a bare /DGGML_MAX_NAME=160 is parsed as an input file,
           # so the compiler test dies with "A single input file is required for a
           # non-link phase when an outputfile is specified" before any ggml source
           # is compiled. -Xcudafe is written with '=' for the same reason - it keeps
@@ -198,9 +198,9 @@ jobs:
             '-DCMAKE_C_COMPILER=cl.exe',
             '-DCMAKE_CXX_COMPILER=cl.exe',
             "-DCMAKE_BUILD_TYPE=${{ github.event.inputs.configuration }}",
-            '-DCMAKE_C_FLAGS=/DGGML_MAX_NAME=128',
-            '-DCMAKE_CXX_FLAGS=/bigobj /DGGML_MAX_NAME=128',
-            '-DCMAKE_CUDA_FLAGS=-Xcudafe=--diag_suppress=177 -Xcudafe=--diag_suppress=550 -DGGML_MAX_NAME=128',
+            '-DCMAKE_C_FLAGS=/DGGML_MAX_NAME=160',
+            '-DCMAKE_CXX_FLAGS=/bigobj /DGGML_MAX_NAME=160',
+            '-DCMAKE_CUDA_FLAGS=-Xcudafe=--diag_suppress=177 -Xcudafe=--diag_suppress=550 -DGGML_MAX_NAME=160',
             '-DCMAKE_CUDA_ARCHITECTURES=${{ github.event.inputs.cuda_architectures }}',
             '-DAUDIOCPP_BUILD_C_API=ON',
             '-DAUDIOCPP_DEPLOYMENT_BUILD=ON',
@@ -301,7 +301,7 @@ jobs:
             "AUDIOCPP_REF: ${{ github.event.inputs.audio_cpp_ref || 'main' }}",
             "AUDIOCPP_COMMIT: ${{ env.AUDIOCPP_COMMIT }}",
             "GGML: vendored, ${{ env.GGML_VENDORED_VERSION }}, statically linked into audiocpp.dll",
-            "GGML_MAX_NAME: 128",
+            "GGML_MAX_NAME: 160",
             "Enabled backends: cpu (static, single ISA), cuda12, vulkan=${{ github.event.inputs.enable_vulkan }}",
             "Configuration: ${{ github.event.inputs.configuration }}",
             "Model set: ${{ github.event.inputs.model_set }}",
@@ -387,9 +387,9 @@ jobs:
 
           cmake -S . -B build -G Ninja \
             -DCMAKE_BUILD_TYPE="${{ github.event.inputs.configuration }}" \
-            -DCMAKE_C_FLAGS="-DGGML_MAX_NAME=128" \
-            -DCMAKE_CXX_FLAGS="-DGGML_MAX_NAME=128 -Wno-deprecated-declarations" \
-            -DCMAKE_CUDA_FLAGS="-DGGML_MAX_NAME=128" \
+            -DCMAKE_C_FLAGS="-DGGML_MAX_NAME=160" \
+            -DCMAKE_CXX_FLAGS="-DGGML_MAX_NAME=160 -Wno-deprecated-declarations" \
+            -DCMAKE_CUDA_FLAGS="-DGGML_MAX_NAME=160" \
             -DCMAKE_CUDA_ARCHITECTURES="${{ github.event.inputs.cuda_architectures }}" \
             -DAUDIOCPP_BUILD_C_API=ON \
             -DAUDIOCPP_DEPLOYMENT_BUILD=ON \
@@ -485,7 +485,7 @@ jobs:
             echo "AUDIOCPP_REF: ${{ github.event.inputs.audio_cpp_ref || 'main' }}"
             echo "AUDIOCPP_COMMIT: ${AUDIOCPP_COMMIT}"
             echo "GGML: vendored, ${GGML_VENDORED_VERSION}, statically linked into libaudiocpp.so"
-            echo "GGML_MAX_NAME: 128"
+            echo "GGML_MAX_NAME: 160"
             echo "Enabled backends: cpu (static, single ISA), cuda12, vulkan=${{ github.event.inputs.enable_vulkan }}"
             echo "Configuration: ${{ github.event.inputs.configuration }}"
             echo "Model set: ${{ github.event.inputs.model_set }}"
@@ -560,7 +560,7 @@ jobs:
           CAT_FLAGS="-target ${TRIPLE}"
           CAT_FLAGS="${CAT_FLAGS} -isystem ${SDK_PATH}/System/iOSSupport/usr/include"
           CAT_FLAGS="${CAT_FLAGS} -iframework ${SDK_PATH}/System/iOSSupport/System/Library/Frameworks"
-          CAT_FLAGS="${CAT_FLAGS} -DGGML_MAX_NAME=128"
+          CAT_FLAGS="${CAT_FLAGS} -DGGML_MAX_NAME=160"
 
           LINK_FLAGS="-target ${TRIPLE} -isysroot ${SDK_PATH}"
           LINK_FLAGS="${LINK_FLAGS} -L${SDK_PATH}/System/iOSSupport/usr/lib"
@@ -661,7 +661,7 @@ jobs:
             echo "AUDIOCPP_REF: ${{ github.event.inputs.audio_cpp_ref || 'main' }}"
             echo "AUDIOCPP_COMMIT: ${AUDIOCPP_COMMIT}"
             echo "GGML: vendored, ${GGML_VENDORED_VERSION}, statically linked into libaudiocpp.dylib"
-            echo "GGML_MAX_NAME: 128"
+            echo "GGML_MAX_NAME: 160"
             echo "Target triple: ${ARCH}-apple-ios${MIN_IOS}-macabi"
             echo "Enabled backends: cpu (armv8.2-a+dotprod), metal"
             echo "Configuration: ${{ github.event.inputs.configuration }}"
@@ -744,8 +744,8 @@ jobs:
             -DANDROID_PLATFORM="android-${ANDROID_API}" \
             -DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON \
             -DCMAKE_BUILD_TYPE="${{ github.event.inputs.configuration }}" \
-            -DCMAKE_C_FLAGS="-DGGML_MAX_NAME=128" \
-            -DCMAKE_CXX_FLAGS="-DGGML_MAX_NAME=128" \
+            -DCMAKE_C_FLAGS="-DGGML_MAX_NAME=160" \
+            -DCMAKE_CXX_FLAGS="-DGGML_MAX_NAME=160" \
             -DGGML_CPU_ARM_ARCH=armv8.2-a+dotprod \
             -DAUDIOCPP_BUILD_C_API=ON \
             -DAUDIOCPP_DEPLOYMENT_BUILD=ON \
@@ -838,7 +838,7 @@ jobs:
             echo "AUDIOCPP_REF: ${{ github.event.inputs.audio_cpp_ref || 'main' }}"
             echo "AUDIOCPP_COMMIT: ${AUDIOCPP_COMMIT}"
             echo "GGML: vendored, ${GGML_VENDORED_VERSION}, statically linked into libaudiocpp.so"
-            echo "GGML_MAX_NAME: 128"
+            echo "GGML_MAX_NAME: 160"
             echo "ABI: ${ANDROID_ABI}, minSdk ${ANDROID_API}"
             echo "Enabled backends: cpu (armv8.2-a+dotprod)"
             echo "Configuration: ${{ github.event.inputs.configuration }}"
