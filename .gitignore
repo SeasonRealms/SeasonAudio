@@ -5,3 +5,4 @@
 /.vs
 /obj
 /bin/Debug
+/bin/Release/net10.0-windows10.0.19041.0
