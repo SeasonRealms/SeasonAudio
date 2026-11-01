@@ -6,7 +6,7 @@ name: build-audio.cpp
 # statically linked into audiocpp, and this workflow never checks out
 # SeasonRealms/ggml. That is deliberate - the vendored tree is ggml 0.12 while the
 # rest of the fleet (SeasonGGML, llama.cpp, qwentts, stable-diffusion) ships
-# SeasonRealms/ggml 0.27 - so the two cannot be merged, and the only way they can
+# SeasonRealms/ggml 0.28 - so the two cannot be merged, and the only way they can
 # share a process is by staying private to each library:
 #
 #   * no ggml*.dll / libggml*.so is produced or shipped by this job,
@@ -22,7 +22,7 @@ name: build-audio.cpp
 # compiles against CUDA 12.8.1, the same toolkit the rest of the fleet uses.
 #
 # iOS is intentionally absent. libaudiocpp.a would carry its own ggml 0.12 into the
-# app while libggml.a (0.27, SeasonGGML) and the ggml copy inside libqwen.a are also
+# app while libggml.a (0.28, SeasonGGML) and the ggml copy inside libqwen.a are also
 # linked there, and duplicate ggml objects cannot be forced into one binary. iOS
 # keeps SeasonTTS / SeasonSTT / SeasonMusic.
 
@@ -309,7 +309,7 @@ jobs:
             "CUDA runtime: not packaged - cudart / cublas / cublasLt / cufft come from cudacudnn-runtime",
             "",
             "Self-contained by design: this package ships NO ggml DLL. audio.cpp's ggml is",
-            "0.12 (its vendored tree) while SeasonGGML ships SeasonRealms/ggml 0.27, and the",
+            "0.12 (its vendored tree) while SeasonGGML ships SeasonRealms/ggml 0.28, and the",
             "two cannot be merged - they share a process only by each keeping its own copy.",
             "The export surface is audiocpp_* only, which is what keeps them apart.",
             "",
@@ -494,7 +494,7 @@ jobs:
             echo ""
             echo "Self-contained by design: this package ships NO libggml*.so. audio.cpp's"
             echo "ggml is 0.12 (its vendored tree) while SeasonGGML ships SeasonRealms/ggml"
-            echo "0.27. The export surface is audiocpp_* only, which is what keeps the two"
+            echo "0.28. The export surface is audiocpp_* only, which is what keeps the two"
             echo "runtimes from interposing on each other in one process."
             echo ""
             echo "Artifact contents:"
@@ -668,7 +668,7 @@ jobs:
             echo "Model set: ${{ github.event.inputs.model_set }}"
             echo ""
             echo "Self-contained by design: libaudiocpp.dylib carries its own ggml 0.12 and"
-            echo "has no dependency on libggml.dylib (SeasonRealms/ggml 0.27). Mach-O"
+            echo "has no dependency on libggml.dylib (SeasonRealms/ggml 0.28). Mach-O"
             echo "two-level namespace keeps the two apart even when both are loaded."
             echo ""
             echo "Artifact contents:"
@@ -845,7 +845,7 @@ jobs:
             echo "Model set: ${{ github.event.inputs.model_set }}"
             echo ""
             echo "Self-contained by design: no libggml*.so is shipped, so the app can link"
-            echo "SeasonGGML's libggml.so (0.27) beside this one without a symbol clash."
+            echo "SeasonGGML's libggml.so (0.28) beside this one without a symbol clash."
             echo "Vulkan is off in this lane; a second VkInstance in a process that already"
             echo "runs SeasonGGML's is the known mobile driver hang shape."
             echo ""
